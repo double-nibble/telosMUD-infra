@@ -9,19 +9,19 @@ resources:
 # Point image names at your GHCR owner; CI overwrites newTag with the built commit SHA.
 images:
   - name: ghcr.io/OWNER/telos-world
-    newName: ghcr.io/OWNER/telos-world # TODO: set OWNER (e.g. ghcr.io/kscherer/telos-world)
+    newName: ghcr.io/double-nibble/telos-world
     newTag: latest
   - name: ghcr.io/OWNER/telos-gate
-    newName: ghcr.io/OWNER/telos-gate
+    newName: ghcr.io/double-nibble/telos-gate
     newTag: latest
   - name: ghcr.io/OWNER/telos-account
-    newName: ghcr.io/OWNER/telos-account
+    newName: ghcr.io/double-nibble/telos-account
     newTag: latest
   - name: ghcr.io/OWNER/telos-migrate
-    newName: ghcr.io/OWNER/telos-migrate
+    newName: ghcr.io/double-nibble/telos-migrate
     newTag: latest
   - name: ghcr.io/OWNER/telos-seed
-    newName: ghcr.io/OWNER/telos-seed
+    newName: ghcr.io/double-nibble/telos-seed
     newTag: latest
 
 patches:
