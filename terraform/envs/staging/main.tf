@@ -17,9 +17,9 @@ module "compute" {
   image_ocid          = var.image_ocid
   ssh_public_key_path = var.ssh_public_key_path
 
-  # Staging: half the free A1 pool (2 OCPU / 12 GB / 50 GB), leaving the rest for production.
-  ocpus           = 2
-  memory_gbs      = 12
+  # Staging: half the free A1 pool by default (overridable to chase capacity).
+  ocpus           = var.ocpus
+  memory_gbs      = var.memory_gbs
   boot_volume_gbs = 50
 }
 

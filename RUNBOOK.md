@@ -44,6 +44,25 @@ Terraform creates the VCN + security list, the A1 VM (cloud-init installs k3s), 
 kubeconfig. If you hit **`Out of host capacity`**, change `region`/availability domain and
 re-apply — A1 free capacity is intermittent.
 
+### "Out of host capacity" (Always-Free A1)
+
+A1 (Ampere) free capacity is chronically scarce in busy regions and frees up in short windows.
+Mitigations, most effective first:
+
+1. **Upgrade the tenancy to Pay-As-You-Go.** Free-only accounts are deprioritized for A1
+   capacity; PAYG accounts get it almost immediately. **Always-Free A1 usage is still unbilled**,
+   so you stay at $0 (a card is required on file, not charged for the free shape).
+2. **Run the retry loop** — sweeps every AD and keeps trying until a host frees up:
+   ```sh
+   scripts/apply-with-retry.sh staging
+   # try a smaller (more findable) shape:
+   OCPUS=1 MEMORY_GBS=6 scripts/apply-with-retry.sh staging
+   ```
+   It only retries on capacity errors; any real error aborts. Partial state is fine — the
+   network is already created, so it just adds the instance.
+3. **Try a less-contended region.** Re-run `scripts/bootstrap-local.sh` after subscribing to a
+   quieter region (Ashburn/Phoenix are the busiest); the image OCID is re-discovered per region.
+
 Fetch the kubeconfig (also produced by the `k3s` module output):
 
 ```sh
