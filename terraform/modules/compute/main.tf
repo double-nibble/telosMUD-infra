@@ -4,16 +4,17 @@ locals {
   # Build cloud-config with yamlencode so indentation/quoting is ALWAYS valid YAML — a hand-
   # templated list is easy to mis-indent, and cloud-init silently drops user-data it can't parse.
   #
-  # runcmd entries each run in their OWN shell, so state does not carry between them: the public
-  # IP must be discovered and used in a SINGLE entry (else --tls-san is empty). Egress is open, so
-  # api.ipify.org returns the instance's public IP; k3s needs it in the API cert SAN for kubectl
-  # over the public IP.
+  # The instance has NO ephemeral public IP (assign_public_ip=false); Terraform attaches a
+  # RESERVED public IP a few seconds after launch. So the k3s install waits for egress to come
+  # up (the reserved IP attaching) before downloading. The API TLS SAN is the stable node_fqdn,
+  # not the IP, so kubectl over the domain stays valid across instance recreations.
   runcmd = concat(
     # Open the app ports in the host firewall (Oracle images default-DROP INPUT except SSH).
     [for port in var.open_tcp_ports : "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"],
     [
       "netfilter-persistent save",
-      "PUBLIC_IP=$(curl -s https://api.ipify.org) && curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"server --tls-san $PUBLIC_IP --write-kubeconfig-mode 644\" sh -s -",
+      "until curl -sfL https://get.k3s.io -o /tmp/install-k3s.sh; do echo 'waiting for egress (reserved IP attach)'; sleep 3; done",
+      "INSTALL_K3S_EXEC=\"server --tls-san ${var.node_fqdn} --write-kubeconfig-mode 644\" sh /tmp/install-k3s.sh",
       "until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do sleep 3; done",
     ],
   )
@@ -43,8 +44,11 @@ resource "oci_core_instance" "this" {
   }
 
   create_vnic_details {
-    subnet_id        = var.subnet_id
-    assign_public_ip = true
+    subnet_id = var.subnet_id
+    # No ephemeral IP — a reserved public IP is attached below so the address is stable across
+    # instance recreations. Egress still works (the reserved IP + IGW route); cloud-init waits
+    # for it to attach before installing k3s.
+    assign_public_ip = false
   }
 
   metadata = {
@@ -57,4 +61,23 @@ resource "oci_core_instance" "this" {
   lifecycle {
     ignore_changes = [source_details[0].source_id]
   }
+}
+
+# The instance's primary VNIC + private IP, so the reserved public IP can attach to it.
+data "oci_core_vnic_attachments" "primary" {
+  compartment_id = var.compartment_ocid
+  instance_id    = oci_core_instance.this.id
+}
+
+data "oci_core_private_ips" "primary" {
+  vnic_id = data.oci_core_vnic_attachments.primary.vnic_attachments[0].vnic_id
+}
+
+# Reserved (static) public IP. On instance replacement Terraform re-associates the SAME address
+# to the new primary private IP, so DNS never needs updating.
+resource "oci_core_public_ip" "reserved" {
+  compartment_id = var.compartment_ocid
+  lifetime       = "RESERVED"
+  display_name   = "${var.name_prefix}-ip"
+  private_ip_id  = data.oci_core_private_ips.primary.private_ips[0].id
 }

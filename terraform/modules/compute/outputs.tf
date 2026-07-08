@@ -4,8 +4,8 @@ output "instance_id" {
 }
 
 output "public_ip" {
-  value       = oci_core_instance.this.public_ip
-  description = "Ephemeral public IP of the instance. Point DNS + kubeconfig at this."
+  value       = oci_core_public_ip.reserved.ip_address
+  description = "Reserved (static) public IP. Point the node_fqdn DNS A-record here; stable across instance recreations."
 }
 
 output "private_ip" {

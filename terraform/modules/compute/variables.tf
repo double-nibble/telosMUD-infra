@@ -51,3 +51,8 @@ variable "open_tcp_ports" {
   default     = [22, 80, 443, 4000, 6443]
   description = "Ports cloud-init opens in the instance host firewall (iptables), before the image's default REJECT. Must match the network security list. 6443 = k3s API."
 }
+
+variable "node_fqdn" {
+  type        = string
+  description = "Stable DNS name for the node (e.g. staging.telos.example.com). Used as the k3s API TLS SAN so kubectl works over the domain regardless of the underlying IP. Point this at the reserved public IP output."
+}

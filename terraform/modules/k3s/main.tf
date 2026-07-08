@@ -36,7 +36,7 @@ resource "null_resource" "fetch_kubeconfig" {
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -i ${pathexpand(var.ssh_private_key_path)} ${var.ssh_user}@${var.public_ip} \
         'sudo cat /etc/rancher/k3s/k3s.yaml' \
-        | sed 's/127.0.0.1/${var.public_ip}/' > ${var.kubeconfig_path}
+        | sed 's/127.0.0.1/${var.api_host}/' > ${var.kubeconfig_path}
       chmod 600 ${var.kubeconfig_path}
     EOT
   }

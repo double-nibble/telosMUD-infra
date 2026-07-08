@@ -1,6 +1,11 @@
 variable "public_ip" {
   type        = string
-  description = "Public IP of the k3s instance (from the compute module)."
+  description = "Reserved public IP of the k3s instance (used for SSH connectivity)."
+}
+
+variable "api_host" {
+  type        = string
+  description = "Stable hostname the kubeconfig server points at (the node_fqdn / k3s API TLS SAN). kubectl connects here; it must resolve (DNS A-record) to public_ip."
 }
 
 variable "instance_id" {

@@ -1,5 +1,6 @@
 locals {
   name_prefix = "telos-production"
+  node_fqdn   = "telos.double-nibble.com"
 }
 
 module "network" {
@@ -16,6 +17,7 @@ module "compute" {
   availability_domain = var.availability_domain
   image_ocid          = var.image_ocid
   ssh_public_key_path = var.ssh_public_key_path
+  node_fqdn           = local.node_fqdn
 
   # Production: the other half of the free A1 pool by default (overridable to chase capacity).
   ocpus           = var.ocpus
@@ -26,6 +28,7 @@ module "compute" {
 module "k3s" {
   source               = "../../modules/k3s"
   public_ip            = module.compute.public_ip
+  api_host             = local.node_fqdn
   instance_id          = module.compute.instance_id
   ssh_private_key_path = var.ssh_private_key_path
   kubeconfig_path      = "${path.root}/kubeconfig"
