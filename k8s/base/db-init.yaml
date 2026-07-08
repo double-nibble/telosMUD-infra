@@ -15,6 +15,7 @@ spec:
         app: db-init
     spec:
       restartPolicy: OnFailure
+      serviceAccountName: telos-init # carries the GHCR imagePullSecret for the private images
       initContainers:
         - name: migrate
           image: ghcr.io/OWNER/telos-migrate

@@ -4,6 +4,12 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: telos-init
+# Attaching the GHCR pull secret here auto-injects it into every pod that uses this SA
+# (world/gate/account/db-init), so private ghcr.io images pull without per-pod config.
+# Create the secret once per cluster (see RUNBOOK), or make the GHCR packages public and
+# this is simply ignored.
+imagePullSecrets:
+  - name: ghcr
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
