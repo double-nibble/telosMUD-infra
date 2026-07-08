@@ -1,6 +1,6 @@
-# Staging = relaxed dev posture: plaintext telnet + bare-name auto-auth so you can smoke-test
-# the telnet path without OAuth, and the keyless/tokenless insecure opt-ins the single-node
-# cluster needs. NEVER copy these to production.
+# Staging posture: plaintext telnet (no TLS) + real GitHub OAuth (same as prod, exercising the
+# real login path on the same hardened release images), plus the keyless/tokenless insecure
+# opt-ins the single-node cluster needs. NEVER copy the insecure/plaintext bits to production.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,13 +11,9 @@ spec:
       containers:
         - name: gate
           env:
+            # Plain telnet on :4000 (no TLS in staging). Login is account-backed OAuth: the gate
+            # hands out a link-code URL (TELOS_ACCOUNT_TARGET is wired in the base config).
             - name: TELOS_GATE_ALLOW_PLAINTEXT
-              value: "1"
-            - name: TELOS_DEV_AUTOAUTH
-              value: "1"
-            # The gate refuses a non-loopback bind under dev-autoauth unless this ack is set.
-            # Exposure is governed by the LoadBalancer Service, not the process bind.
-            - name: TELOS_DEV_AUTOAUTH_ALLOW_REMOTE_BIND
               value: "1"
 ---
 apiVersion: apps/v1
@@ -47,11 +43,22 @@ spec:
             - name: TELOS_ALLOW_INSECURE
               value: "1" # tokenless account gRPC (staging only)
             - name: TELOS_WEB_SECURE_COOKIES
-              value: "0" # staging may be served over plain http
+              value: "0" # staging serves the website over plain http (no domain/TLS yet)
+            # Public base URL the /login link + OAuth callback derive from. nip.io -> node IP.
             - name: TELOS_WEB_PUBLIC_URL
-              value: "http://staging.example.com:8080" # TODO: staging host/domain
+              value: "http://129.213.41.199.nip.io"
             - name: TELOS_WEB_SESSION_KEY
               valueFrom:
                 secretKeyRef:
                   name: telos-secrets
                   key: TELOS_WEB_SESSION_KEY
+            - name: TELOS_GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_GITHUB_CLIENT_ID
+            - name: TELOS_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_GITHUB_CLIENT_SECRET

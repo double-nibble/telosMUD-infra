@@ -5,6 +5,7 @@ namespace: telosmud
 
 resources:
   - ../../base
+  - ingress-staging.yaml
 
 # Point image names at your GHCR owner; CI overwrites newTag with the built commit SHA.
 images:

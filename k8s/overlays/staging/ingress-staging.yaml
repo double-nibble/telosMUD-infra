@@ -1,0 +1,26 @@
+# Staging web ingress: serve the account OAuth website (account:8080) through k3s's bundled
+# Traefik on port 80 (already open in the firewall) at http://<node-ip>.nip.io/.
+#
+# nip.io is a free wildcard-DNS service: 129.213.41.199.nip.io resolves to 129.213.41.199.
+# It gives GitHub's OAuth app a real hostname (nicer than a raw IP) with zero DNS setup. The
+# host tracks the node's public IP — if the instance is recreated and the IP changes, update
+# this host + TELOS_WEB_PUBLIC_URL + the GitHub OAuth app callback. (A real domain removes this.)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: account-web
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: 129.213.41.199.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: account
+                port:
+                  number: 8080
