@@ -21,5 +21,5 @@ variable "ssh_user" {
 
 variable "kubeconfig_path" {
   type        = string
-  description = "Local path to write the fetched kubeconfig to, e.g. \"${path.root}/kubeconfig\"."
+  description = "Local path to write the fetched kubeconfig to (typically a 'kubeconfig' file in the env root)."
 }
