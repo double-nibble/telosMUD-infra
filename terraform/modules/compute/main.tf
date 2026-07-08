@@ -1,5 +1,30 @@
 # A single Always-Free A1 (Ampere/ARM) flex instance running k3s (installed via cloud-init).
 
+locals {
+  # Build cloud-config with yamlencode so indentation/quoting is ALWAYS valid YAML — a hand-
+  # templated list is easy to mis-indent, and cloud-init silently drops user-data it can't parse.
+  #
+  # runcmd entries each run in their OWN shell, so state does not carry between them: the public
+  # IP must be discovered and used in a SINGLE entry (else --tls-san is empty). Egress is open, so
+  # api.ipify.org returns the instance's public IP; k3s needs it in the API cert SAN for kubectl
+  # over the public IP.
+  runcmd = concat(
+    # Open the app ports in the host firewall (Oracle images default-DROP INPUT except SSH).
+    [for port in var.open_tcp_ports : "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"],
+    [
+      "netfilter-persistent save",
+      "PUBLIC_IP=$(curl -s https://api.ipify.org) && curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"server --tls-san $PUBLIC_IP --write-kubeconfig-mode 644\" sh -s -",
+      "until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do sleep 3; done",
+    ],
+  )
+
+  cloud_config = "#cloud-config\n${yamlencode({
+    package_update = true
+    packages       = ["iptables-persistent"]
+    runcmd         = local.runcmd
+  })}"
+}
+
 resource "oci_core_instance" "this" {
   compartment_id      = var.compartment_ocid
   availability_domain = var.availability_domain
@@ -25,9 +50,7 @@ resource "oci_core_instance" "this" {
   metadata = {
     # pathexpand so a "~/..." key path works (file() alone does not expand ~).
     ssh_authorized_keys = file(pathexpand(var.ssh_public_key_path))
-    user_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tftpl", {
-      open_tcp_ports = var.open_tcp_ports
-    }))
+    user_data           = base64encode(local.cloud_config)
   }
 
   # A1 free capacity is intermittent; ignore image drift so a re-apply doesn't rebuild.
