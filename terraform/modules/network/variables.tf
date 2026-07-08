@@ -22,6 +22,6 @@ variable "subnet_cidr" {
 
 variable "ingress_tcp_ports" {
   type        = list(number)
-  default     = [22, 80, 443, 4000, 4001]
-  description = "TCP ports opened to the internet at the security-list level. 4000=telnet, 4001=account-backed telnet, 443=web/OAuth, 80=ACME http-01 fallback, 22=ssh."
+  default     = [22, 80, 443, 4000, 6443]
+  description = "TCP ports opened to the internet at the security-list level. 22=ssh, 80=ACME http-01 fallback, 443=web/OAuth, 4000=telnet gate, 6443=k3s API (TLS+token auth; needed for remote kubectl/CI — restrict source later if desired)."
 }

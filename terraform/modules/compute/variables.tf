@@ -48,6 +48,6 @@ variable "boot_volume_gbs" {
 
 variable "open_tcp_ports" {
   type        = list(number)
-  default     = [22, 80, 443, 4000, 4001]
-  description = "Ports cloud-init opens in the instance host firewall (iptables). Must match the network security list."
+  default     = [22, 80, 443, 4000, 6443]
+  description = "Ports cloud-init opens in the instance host firewall (iptables), before the image's default REJECT. Must match the network security list. 6443 = k3s API."
 }
