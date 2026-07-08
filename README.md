@@ -28,7 +28,14 @@ k8s/
 scripts/                           # helper scripts (kubeconfig fetch, bootstrap)
 ```
 
+## Local setup
+
+Configure the `oci` CLI (`oci setup config`), then run **`scripts/bootstrap-local.sh`** — it
+discovers your tenancy identifiers and writes the gitignored `terraform.tfvars` for both
+environments (and creates the SSH key). No OCIDs are hand-copied between machines; a
+collaborator just needs their own `oci` CLI configured. See [RUNBOOK.md](RUNBOOK.md).
+
 ## Status
 
-First-pass scaffold. Values that require your OCI tenancy (compartment/tenancy OCIDs,
-region, SSH key) and your domain are marked `# TODO` in the tfvars and overlay files.
+Scaffold with a working local-bootstrap path. The remaining `# TODO`s are your **domain**
+(production OAuth/TLS) and the optional remote-state bucket name.

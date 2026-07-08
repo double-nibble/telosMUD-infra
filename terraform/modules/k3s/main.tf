@@ -10,7 +10,7 @@ resource "null_resource" "wait_for_k3s" {
     type        = "ssh"
     host        = var.public_ip
     user        = var.ssh_user
-    private_key = file(var.ssh_private_key_path)
+    private_key = file(pathexpand(var.ssh_private_key_path))
     timeout     = "10m"
   }
 
@@ -34,7 +34,7 @@ resource "null_resource" "fetch_kubeconfig" {
   provisioner "local-exec" {
     command = <<-EOT
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -i ${var.ssh_private_key_path} ${var.ssh_user}@${var.public_ip} \
+        -i ${pathexpand(var.ssh_private_key_path)} ${var.ssh_user}@${var.public_ip} \
         'sudo cat /etc/rancher/k3s/k3s.yaml' \
         | sed 's/127.0.0.1/${var.public_ip}/' > ${var.kubeconfig_path}
       chmod 600 ${var.kubeconfig_path}

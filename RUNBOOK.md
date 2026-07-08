@@ -5,24 +5,39 @@ See [PLAN.md](PLAN.md) for the design and rationale.
 
 ## 0. Prerequisites (one-time)
 
-- An **Oracle Cloud** account (free tier is enough). Note your **tenancy OCID**, create a
-  **compartment** for TelosMUD, and generate an **API signing key** (User → API Keys).
+- An **Oracle Cloud** account (free tier is enough) with a **compartment** for TelosMUD.
+- Configure the **`oci` CLI**: `oci setup config` (creates `~/.oci/config` + an API signing key).
+  This is the ONLY per-collaborator setup — everything else is discovered.
 - Install locally: `terraform`, `oci` CLI, `kubectl`, `kustomize`, `sops`, `age`.
-- Generate the SOPS key: `age-keygen -o age.key` → copy the `public key:` line into
-  [.sops.yaml](.sops.yaml). Store the file's contents as the `SOPS_AGE_KEY` GitHub Actions
-  secret in this repo.
-- Create an **OCI Object Storage bucket** for Terraform state; put its name/namespace in the
-  `backend.tf` of each env.
-- Create an SSH keypair for the VMs; upload the public key path into the env `*.tfvars`.
-- In the `gomud` repo, ensure images publish **arm64** to GHCR (`docker buildx --platform linux/arm64`).
+
+### Bootstrap your local config (idempotent)
+
+Instead of hand-copying OCIDs between machines, run:
+
+```sh
+scripts/bootstrap-local.sh
+```
+
+It reads your configured `oci` CLI and writes the gitignored
+`terraform/envs/{staging,production}/terraform.tfvars` (tenancy, region, compartment,
+availability domain, object-storage namespace, newest Ubuntu 22.04 arm64 image OCID) and
+creates `~/.ssh/telos_id_ed25519` if missing. No secrets are involved — Terraform auth comes
+from `~/.oci/config`. Override the compartment name with `TELOS_COMPARTMENT=<name>` (default
+`telosmud`, matched case-insensitively) or the AD with `TELOS_AD=<name>`.
+
+For the **SOPS** secret path (needed only for CI or encrypted secrets): `age-keygen -o age.key`
+→ copy the `public key:` line into [.sops.yaml](.sops.yaml); store the file contents as the
+`SOPS_AGE_KEY` GitHub Actions secret. For **remote Terraform state**, create an OCI Object
+Storage bucket and a Customer Secret Key (the `backend.tf` endpoint/namespace is pre-filled).
 
 ## 1. Provision the cluster (Terraform)
 
 ```sh
+scripts/bootstrap-local.sh        # writes terraform.tfvars + ssh key
 cd terraform/envs/staging
-# Fill in terraform.tfvars: tenancy/compartment OCIDs, region, ssh_public_key_path, etc.
+# First run: comment out the backend "s3" block in backend.tf to use local state.
 terraform init
-terraform apply
+terraform apply                   # "Out of host capacity"? try TELOS_AD=...-2, re-run bootstrap, retry
 ```
 
 Terraform creates the VCN + security list, the A1 VM (cloud-init installs k3s), and writes a

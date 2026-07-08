@@ -23,7 +23,8 @@ resource "oci_core_instance" "this" {
   }
 
   metadata = {
-    ssh_authorized_keys = file(var.ssh_public_key_path)
+    # pathexpand so a "~/..." key path works (file() alone does not expand ~).
+    ssh_authorized_keys = file(pathexpand(var.ssh_public_key_path))
     user_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tftpl", {
       open_tcp_ports = var.open_tcp_ports
     }))
