@@ -1,0 +1,65 @@
+name: deploy
+
+# Renders the Kustomize overlay and applies it to the cluster. Decrypts the SOPS secret and
+# applies it too. Runs on manual dispatch and on pushes to main that touch k8s/.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to deploy"
+        type: choice
+        options: [staging, production]
+        default: staging
+  push:
+    branches: [main]
+    paths: ["k8s/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # On push, deploy staging only; production is manual (workflow_dispatch) for safety.
+        env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging"]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          curl -sSL -o /usr/local/bin/kustomize https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize || true
+          # kubectl
+          curl -sSLo kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install kubectl /usr/local/bin/kubectl
+          # kustomize (official installer)
+          curl -sS "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo install kustomize /usr/local/bin/kustomize
+          # sops + age
+          curl -sSLo sops https://github.com/getsops/sops/releases/latest/download/sops-v3.9.0.linux.amd64
+          sudo install sops /usr/local/bin/sops
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Apply secrets (SOPS)
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          sops -d k8s/overlays/${{ matrix.env }}/secrets.enc.yaml | kubectl apply -f -
+
+      - name: Recreate db-init job (Jobs are immutable)
+        run: kubectl -n telosmud delete job db-init --ignore-not-found
+
+      - name: Deploy
+        run: kustomize build k8s/overlays/${{ matrix.env }} | kubectl apply -f -
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n telosmud rollout status deploy/world --timeout=300s
+          kubectl -n telosmud rollout status deploy/gate --timeout=300s
+          kubectl -n telosmud rollout status deploy/account --timeout=300s

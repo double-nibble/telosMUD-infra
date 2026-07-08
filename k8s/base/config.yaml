@@ -1,0 +1,14 @@
+# Non-secret shared config. In-cluster service DNS (same namespace) resolves by service name.
+# Secrets (TELOS_POSTGRES_DSN, session/signing keys, OAuth creds, POSTGRES_PASSWORD) live in the
+# `telos-secrets` Secret, applied separately from the SOPS-encrypted overlay file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telos-config
+data:
+  TELOS_REDIS_ADDR: "redis:6379"
+  TELOS_NATS_URL: "nats://nats:4222"
+  TELOS_WORLD_TARGET: "world:9090"
+  TELOS_ACCOUNT_TARGET: "account:9100"
+  # NOTE: TELOS_ZONES is service-specific (world = zones HOSTED; gate = spawn zone), so it is
+  # set per-Deployment, not here.

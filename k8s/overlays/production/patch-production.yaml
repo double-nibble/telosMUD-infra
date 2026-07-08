@@ -1,0 +1,104 @@
+# Production hardening. Everything the dev compose flips for prod: TLS-only telnet, gRPC caller
+# token, signed session assertions, secure cookies, real OAuth + domain, and (instead of
+# TELOS_ALLOW_INSECURE) a real handoff keypair.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate
+spec:
+  template:
+    spec:
+      containers:
+        - name: gate
+          env:
+            # TLS-only: no plaintext, no autoauth. Cert comes from the cert-manager `gate-tls`
+            # Secret mounted below.
+            - name: TELOS_GATE_TLS_LISTEN
+              value: ":4000"
+            - name: TELOS_GATE_TLS_CERT
+              value: "/tls/tls.crt"
+            - name: TELOS_GATE_TLS_KEY
+              value: "/tls/tls.key"
+            - name: TELOS_ACCOUNT_CALLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_ACCOUNT_CALLER_TOKEN
+          volumeMounts:
+            - name: gate-tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: gate-tls
+          secret:
+            secretName: gate-tls # produced by the cert-manager Certificate in ingress.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: world
+spec:
+  template:
+    spec:
+      containers:
+        - name: world
+          env:
+            # Prod uses a real handoff keypair instead of TELOS_ALLOW_INSECURE. NOTE: a single
+            # shard never hands off — verify whether the boot guard still requires these
+            # (PLAN.md open item). If it does not, they are harmless; if the guard rejects a
+            # keyless single node, this satisfies it without opening insecure mode.
+            - name: TELOS_HANDOFF_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_HANDOFF_SIGNING_KEY
+            - name: TELOS_HANDOFF_VERIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_HANDOFF_VERIFY_KEY
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: account
+spec:
+  template:
+    spec:
+      containers:
+        - name: account
+          env:
+            - name: TELOS_WEB_SECURE_COOKIES
+              value: "1"
+            - name: TELOS_WEB_PUBLIC_URL
+              value: "https://mud.example.com" # TODO: your prod domain
+            - name: TELOS_ACCOUNT_CALLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_ACCOUNT_CALLER_TOKEN
+            - name: TELOS_ACCOUNT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_ACCOUNT_SIGNING_KEY
+            - name: TELOS_ACCOUNT_VERIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_ACCOUNT_VERIFY_KEY
+            - name: TELOS_WEB_SESSION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_WEB_SESSION_KEY
+            - name: TELOS_GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_GITHUB_CLIENT_ID
+            - name: TELOS_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_GITHUB_CLIENT_SECRET

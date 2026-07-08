@@ -1,0 +1,27 @@
+# Minimal RBAC so the world/account initContainers can `kubectl wait` for the db-init Job to
+# complete before booting (the k8s equivalent of compose's depends_on: service_completed_successfully).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: telos-init
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: telos-job-reader
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: telos-init-job-reader
+subjects:
+  - kind: ServiceAccount
+    name: telos-init
+roleRef:
+  kind: Role
+  name: telos-job-reader
+  apiGroup: rbac.authorization.k8s.io

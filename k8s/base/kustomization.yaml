@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: telosmud
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - config.yaml
+  - postgres.yaml
+  - redis.yaml
+  - nats.yaml
+  - db-init.yaml
+  - world.yaml
+  - gate.yaml
+  - account.yaml
+
+# The `telos-secrets` Secret is NOT listed here — it is SOPS-encrypted in each overlay and
+# applied separately (`sops -d overlays/<env>/secrets.enc.yaml | kubectl apply -f -`).
+
+# Overlays override these image names/tags to your GHCR owner + the built image SHA.
+images:
+  - name: ghcr.io/OWNER/telos-world
+  - name: ghcr.io/OWNER/telos-gate
+  - name: ghcr.io/OWNER/telos-account
+  - name: ghcr.io/OWNER/telos-migrate
+  - name: ghcr.io/OWNER/telos-seed

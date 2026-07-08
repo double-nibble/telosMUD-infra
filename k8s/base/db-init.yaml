@@ -1,0 +1,35 @@
+# One-shot: apply migrations (advisory-locked), then import the demo content pack. Ordered
+# within a single pod: telos-migrate as an initContainer, telos-seed as the main container.
+# Mirrors the compose `migrate` -> `seed` dependency. Re-runnable: migrate is idempotent and
+# seed imports by pack. Recreate the Job to re-run (Jobs are immutable) — the deploy workflow
+# deletes-then-applies it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: db-init
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: migrate
+          image: ghcr.io/OWNER/telos-migrate
+          env:
+            - name: TELOS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_POSTGRES_DSN
+      containers:
+        - name: seed
+          image: ghcr.io/OWNER/telos-seed
+          env:
+            - name: TELOS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_POSTGRES_DSN

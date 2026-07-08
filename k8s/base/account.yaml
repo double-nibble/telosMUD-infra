@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: account
+spec:
+  selector:
+    app: account
+  ports:
+    - name: grpc
+      port: 9100
+      targetPort: 9100
+    - name: web
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: account
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: account
+  template:
+    metadata:
+      labels:
+        app: account
+    spec:
+      serviceAccountName: telos-init
+      initContainers:
+        - name: wait-db-init
+          image: rancher/kubectl:v1.30.2
+          command: ["kubectl", "wait", "--for=condition=complete", "--timeout=600s", "job/db-init"]
+      containers:
+        - name: account
+          image: ghcr.io/OWNER/telos-account
+          env:
+            - name: TELOS_SERVICE
+              value: telos-account
+            - name: TELOS_ACCOUNT_LISTEN
+              value: ":9100"
+            - name: TELOS_WEB_LISTEN
+              value: ":8080"
+            - name: TELOS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_POSTGRES_DSN
+            # Session cookie signing key + (prod) GitHub OAuth creds + gRPC caller token come
+            # from the Secret; overlays wire the env->secret refs they need.
+          envFrom:
+            - configMapRef:
+                name: telos-config
+          ports:
+            - containerPort: 9100
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

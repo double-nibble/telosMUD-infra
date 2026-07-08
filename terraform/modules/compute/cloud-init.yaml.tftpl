@@ -1,0 +1,23 @@
+#cloud-config
+# Bootstraps a single-node k3s cluster on Ubuntu 22.04 (arm64).
+#  - opens the app ports in the host firewall (Oracle images block all but SSH by default)
+#  - installs k3s (Traefik + servicelb stay enabled: Traefik fronts the web/OAuth ingress,
+#    servicelb gives the telnet Service a free LoadBalancer on the node IP)
+package_update: true
+packages:
+  - iptables-persistent
+
+runcmd:
+  # Open the app ports in the host firewall. Oracle's Ubuntu image ships default-DROP
+  # INPUT rules on the instance itself, separate from the VCN security list.
+  %{ for port in open_tcp_ports ~}
+  - iptables -I INPUT -p tcp --dport ${port} -j ACCEPT
+  %{ endfor ~}
+  - netfilter-persistent save
+  # Self-discover the instance's public IP so the k3s API cert includes it (kubectl reaches
+  # the API over the public IP). Avoids templating the IP before the instance exists.
+  - PUBLIC_IP=$(curl -s https://api.ipify.org)
+  # Install k3s (single node = server + agent). --write-kubeconfig-mode 644 so the kubeconfig
+  # is readable for the fetch step.
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --tls-san $PUBLIC_IP --write-kubeconfig-mode 644" sh -s -
+  - until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do sleep 3; done

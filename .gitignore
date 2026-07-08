@@ -1,0 +1,33 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars.local
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl.bak
+
+# Secrets — only *.enc.yaml (SOPS-encrypted) may be committed. Plaintext never.
+*.dec.yaml
+*.secret.yaml
+!*.enc.yaml
+age.key
+*.agekey
+kubeconfig
+kubeconfig-*
+*.kubeconfig
+
+# SSH keys
+*.pem
+id_rsa*
+id_ed25519*
+
+# OS / editor
+.DS_Store
+*.swp

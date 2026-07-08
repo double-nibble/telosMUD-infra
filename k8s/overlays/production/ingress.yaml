@@ -1,0 +1,43 @@
+# Web/OAuth ingress via k3s's bundled Traefik, TLS from cert-manager (Let's Encrypt).
+# The gate's telnet TLS uses the same issuer via the separate Certificate below.
+#
+# PREREQUISITE (cluster add-on, not managed by Kustomize): install cert-manager and create a
+# `letsencrypt` ClusterIssuer using DNS-01 (Cloudflare token in a Secret). See RUNBOOK step 2.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: account-web
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - mud.example.com # TODO: your prod domain
+      secretName: web-tls
+  rules:
+    - host: mud.example.com # TODO: your prod domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: account
+                port:
+                  number: 8080
+---
+# Telnet TLS cert for the gate. cert-manager writes the keypair into the `gate-tls` Secret,
+# which patch-production.yaml mounts into the gate at /tls.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gate-tls
+spec:
+  secretName: gate-tls
+  dnsNames:
+    - mud.example.com # TODO: your prod domain (players `telnet`/TLS to this host:4000)
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer

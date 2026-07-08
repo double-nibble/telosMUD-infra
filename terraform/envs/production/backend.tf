@@ -1,0 +1,35 @@
+terraform {
+  required_version = ">= 1.6"
+
+  required_providers {
+    oci = {
+      source  = "oracle/oci"
+      version = ">= 5.0"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = ">= 3.2"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = ">= 2.4"
+    }
+  }
+
+  # State in an OCI Object Storage bucket (S3-compatible). Same bucket as staging, different key.
+  backend "s3" {
+    bucket                      = "telosmud-tfstate"             # TODO: your bucket name
+    key                         = "production/terraform.tfstate"
+    region                      = "us-ashburn-1"                 # TODO: your region
+    endpoints                   = { s3 = "https://<namespace>.compat.objectstorage.us-ashburn-1.oraclecloud.com" } # TODO: your object-storage namespace
+    skip_region_validation      = true
+    skip_credentials_validation = true
+    skip_requesting_account_id  = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+  }
+}
+
+provider "oci" {
+  region = var.region
+}

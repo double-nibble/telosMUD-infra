@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gate
+  # type: LoadBalancer -> k3s Klipper servicelb binds :4000 on the node's public IP. This is
+  # the FREE L4 load balancer that makes the raw-TCP telnet front door work without a cloud LB.
+spec:
+  type: LoadBalancer
+  selector:
+    app: gate
+  ports:
+    - name: telnet
+      port: 4000
+      targetPort: 4000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gate
+  template:
+    metadata:
+      labels:
+        app: gate
+    spec:
+      serviceAccountName: telos-init
+      initContainers:
+        # Gate needs the world (and, for account-backed login, the account) reachable first.
+        - name: wait-world
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z world 9090; do echo waiting for world; sleep 2; done"]
+      containers:
+        - name: gate
+          image: ghcr.io/OWNER/telos-gate
+          env:
+            - name: TELOS_SERVICE
+              value: telos-gate
+            - name: TELOS_GATE_LISTEN
+              value: ":4000"
+            # Spawn zone for fresh logins (distinct meaning from the world's hosted-zones list).
+            - name: TELOS_ZONES
+              value: "midgaard"
+          envFrom:
+            - configMapRef:
+                name: telos-config
+          ports:
+            - containerPort: 4000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

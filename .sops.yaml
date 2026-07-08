@@ -1,0 +1,8 @@
+# SOPS creation rules: any file matching *.enc.yaml under k8s/overlays is encrypted
+# to the age recipient below. Regenerate the recipient with `age-keygen` and paste the
+# public key here; keep the private key out of git (it's a GitHub Actions secret).
+creation_rules:
+  - path_regex: k8s/overlays/.*\.enc\.yaml$
+    encrypted_regex: "^(data|stringData)$"
+    # TODO: replace with your age public key (age-keygen -o age.key; the "public key:" line).
+    age: age1TODO_REPLACE_WITH_YOUR_AGE_PUBLIC_KEY
