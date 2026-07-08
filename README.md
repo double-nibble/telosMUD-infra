@@ -15,6 +15,10 @@ whole thing costs **$0** — no managed databases, no paid cloud load balancer.
 Start with [PLAN.md](PLAN.md) for the design and cost model, then [RUNBOOK.md](RUNBOOK.md)
 for the step-by-step bring-up.
 
+**Deploying your own MUD (any cloud)?** See **[DEPLOYMENT.md](DEPLOYMENT.md)** — a vendor-neutral
+guide for admins standing up a Telos MUD, covering prerequisites, content packs, configuration,
+and hardening. (PLAN/RUNBOOK are the Oracle+k3s reference implementation of that guide.)
+
 ## Layout
 
 ```
