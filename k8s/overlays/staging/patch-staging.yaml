@@ -43,10 +43,10 @@ spec:
             - name: TELOS_ALLOW_INSECURE
               value: "1" # tokenless account gRPC (staging only)
             - name: TELOS_WEB_SECURE_COOKIES
-              value: "0" # staging serves the website over plain http (no domain/TLS yet)
-            # Public base URL the /login link + OAuth callback derive from. nip.io -> node IP.
+              value: "1" # served over HTTPS (Let's Encrypt via cert-manager)
+            # Public base URL the /login link + OAuth callback derive from (stable domain).
             - name: TELOS_WEB_PUBLIC_URL
-              value: "http://129.213.41.199.nip.io"
+              value: "https://staging.telos.double-nibble.com"
             - name: TELOS_WEB_SESSION_KEY
               valueFrom:
                 secretKeyRef:
