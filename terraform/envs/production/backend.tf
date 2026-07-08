@@ -20,8 +20,8 @@ terraform {
   backend "s3" {
     bucket                      = "telosmud-tfstate"             # TODO: your bucket name
     key                         = "production/terraform.tfstate"
-    region                      = "us-ashburn-1"                 # TODO: your region
-    endpoints                   = { s3 = "https://<namespace>.compat.objectstorage.us-ashburn-1.oraclecloud.com" } # TODO: your object-storage namespace
+    region                      = "us-ashburn-1"
+    endpoints                   = { s3 = "https://idknnsi3cdrb.compat.objectstorage.us-ashburn-1.oraclecloud.com" }
     skip_region_validation      = true
     skip_credentials_validation = true
     skip_requesting_account_id  = true
