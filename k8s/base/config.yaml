@@ -10,5 +10,11 @@ data:
   TELOS_NATS_URL: "nats://nats:4222"
   TELOS_WORLD_TARGET: "world:9090"
   TELOS_ACCOUNT_TARGET: "account:9100"
+  # The enabled content pack set. Staging runs off the EXTERNAL content store (telosMUD-content),
+  # imported by telos-pull (db-init) — so world AND account load the same `reference` pack (they must
+  # match: the world applies the content trust-ladder as engine flags while account authorizes against
+  # it). Shared here so every service inherits it via envFrom. (Empty would default to the embedded
+  # `demo` fixture.)
+  TELOS_CONTENT_PACKS: "reference"
   # NOTE: TELOS_ZONES is service-specific (world = zones HOSTED; gate = spawn zone), so it is
   # set per-Deployment, not here.

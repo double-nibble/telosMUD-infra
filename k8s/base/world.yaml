@@ -43,9 +43,11 @@ spec:
               value: "world:9090"
             - name: TELOS_SHARD_ID
               value: "shard-a"
-            # Single shard hosts ALL zones; the market<->grove boundary is crossed in-process.
+            # Single shard hosts ALL zones; the market<->grove boundary is crossed in-process. `overworld`
+            # is the wilderness plains between midgaard and darkwood (content v0.2.0) — it MUST be hosted here
+            # or the market `exit` into it (and the plains->darkwood `enter`) is a sealed boundary.
             - name: TELOS_ZONES
-              value: "midgaard,darkwood,crypt"
+              value: "midgaard,darkwood,crypt,overworld"
             - name: TELOS_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
