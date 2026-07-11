@@ -40,8 +40,12 @@ jobs:
           # kubectl (pinned to the current stable release)
           curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install kubectl /usr/local/bin/kubectl
-          # kustomize (official installer)
-          curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          # kustomize (pinned versioned asset — the upstream install_kustomize.sh script's GitHub-API
+          # version probe intermittently fails to resolve the tarball ("kustomize_v*_...tar.gz: Cannot
+          # open"), so fetch a known release directly, same discipline as the sops pin below)
+          KUSTOMIZE_VERSION=v5.4.3
+          curl -fsSLo kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz kustomize
           sudo install kustomize /usr/local/bin/kustomize
           # sops (versioned asset path — NOT latest/download, which does not serve a version-named file)
           curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.9.0/sops-v3.9.0.linux.amd64
