@@ -1,7 +1,14 @@
 name: deploy
 
-# Renders the Kustomize overlay and applies it to the cluster. Decrypts the SOPS secret and
-# applies it too. Runs on manual dispatch and on pushes to main that touch k8s/.
+# Renders the Kustomize overlay and applies it to the cluster. Optionally decrypts + applies the SOPS
+# secret first. Runs on manual dispatch and on pushes to main that touch k8s/.
+#
+# REQUIRED repo secrets for this to actually reach a cluster:
+#   - KUBECONFIG_STAGING (and KUBECONFIG_PRODUCTION) — base64 of the cluster kubeconfig.
+# OPTIONAL (only if you keep cluster Secrets under SOPS in this repo):
+#   - SOPS_AGE_KEY + a committed k8s/overlays/<env>/secrets.enc.yaml. When either is absent the secrets
+#     step is SKIPPED with a note — the cluster's already-applied `telos-secrets` is used as-is. (Staging
+#     was bootstrapped by applying secrets manually, so the SOPS path is off by default.)
 on:
   workflow_dispatch:
     inputs:
@@ -27,39 +34,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tooling
+      - name: Install tooling (kubectl, kustomize, sops)
         run: |
-          curl -sSL -o /usr/local/bin/kustomize https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize || true
-          # kubectl
-          curl -sSLo kubectl "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          set -euo pipefail
+          # kubectl (pinned to the current stable release)
+          curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install kubectl /usr/local/bin/kubectl
           # kustomize (official installer)
-          curl -sS "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo install kustomize /usr/local/bin/kustomize
-          # sops + age
-          curl -sSLo sops https://github.com/getsops/sops/releases/latest/download/sops-v3.9.0.linux.amd64
+          # sops (versioned asset path — NOT latest/download, which does not serve a version-named file)
+          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.9.0/sops-v3.9.0.linux.amd64
           sudo install sops /usr/local/bin/sops
 
       - name: Configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}
         run: |
+          set -euo pipefail
+          if [ -z "${KUBECONFIG_B64}" ]; then
+            echo "::error::Missing repo secret KUBECONFIG_${{ matrix.env }} (base64 of the cluster kubeconfig)."
+            echo "::error::Add it in the repo settings, or deploy locally per RUNBOOK.md §4."
+            exit 1
+          fi
           mkdir -p ~/.kube
-          echo "${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}" | base64 -d > ~/.kube/config
+          echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          kubectl version --client >/dev/null
 
-      - name: Apply secrets (SOPS)
+      - name: Apply cluster Secrets (SOPS — optional)
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
-          sops -d k8s/overlays/${{ matrix.env }}/secrets.enc.yaml | kubectl apply -f -
+          set -euo pipefail
+          ENC="k8s/overlays/${{ matrix.env }}/secrets.enc.yaml"
+          if [ -z "${SOPS_AGE_KEY:-}" ] || [ ! -f "${ENC}" ]; then
+            echo "::notice::SOPS not configured (no SOPS_AGE_KEY and/or ${ENC}) — skipping. Using the cluster's existing telos-secrets."
+            exit 0
+          fi
+          sops -d "${ENC}" | kubectl apply -f -
 
-      - name: Recreate db-init job (Jobs are immutable)
+      - name: Recreate db-init job (Jobs are immutable) to re-run migrate + content import
         run: kubectl -n telosmud delete job db-init --ignore-not-found
 
       - name: Deploy
-        run: kustomize build k8s/overlays/${{ matrix.env }} | kubectl apply -f -
+        run: kustomize build "k8s/overlays/${{ matrix.env }}" | kubectl apply -f -
 
-      - name: Wait for rollout
+      - name: Wait for content import + rollout
         run: |
+          set -euo pipefail
+          kubectl -n telosmud wait --for=condition=complete job/db-init --timeout=300s
           kubectl -n telosmud rollout status deploy/world --timeout=300s
           kubectl -n telosmud rollout status deploy/gate --timeout=300s
           kubectl -n telosmud rollout status deploy/account --timeout=300s
