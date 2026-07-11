@@ -11,25 +11,24 @@ resources:
 images:
   - name: ghcr.io/OWNER/telos-world
     newName: ghcr.io/double-nibble/telos-world
-    newTag: sha-1321619
+    newTag: sha-6510e28
   - name: ghcr.io/OWNER/telos-gate
     newName: ghcr.io/double-nibble/telos-gate
-    newTag: sha-1321619
+    newTag: sha-6510e28
   - name: ghcr.io/OWNER/telos-account
     newName: ghcr.io/double-nibble/telos-account
-    newTag: sha-1321619
+    newTag: sha-6510e28
   - name: ghcr.io/OWNER/telos-migrate
     newName: ghcr.io/double-nibble/telos-migrate
-    newTag: sha-1321619
+    newTag: sha-6510e28
   - name: ghcr.io/OWNER/telos-seed
     newName: ghcr.io/double-nibble/telos-seed
-    newTag: sha-1321619
-  # db-init now runs telos-pull (external content store) instead of telos-seed. Pinned to `latest`: the
-  # sha-1321619 build predates telos-pull being added to the engine release matrix, so it has no
-  # sha-1321619 tag — `latest` resolves to the newest build once that engine PR merges + publishes.
+    newTag: sha-6510e28
+  # db-init now runs telos-pull (external content store) instead of telos-seed. Pinned to the same
+  # immutable commit SHA as the rest of the fleet so a redeploy rolls the content-import tool in lockstep.
   - name: ghcr.io/OWNER/telos-pull
     newName: ghcr.io/double-nibble/telos-pull
-    newTag: latest
+    newTag: sha-6510e28
 
 patches:
   - path: patch-staging.yaml
