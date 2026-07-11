@@ -38,7 +38,7 @@ spec:
             - name: TELOS_CONTENT_URL
               value: "https://github.com/double-nibble/telosmud-content.git"
             - name: TELOS_CONTENT_VERSION
-              value: "v0.2.0"
+              value: "v0.3.0"
             - name: TELOS_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
