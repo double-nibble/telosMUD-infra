@@ -1,8 +1,9 @@
-# One-shot: apply migrations (advisory-locked), then import the demo content pack. Ordered
-# within a single pod: telos-migrate as an initContainer, telos-seed as the main container.
-# Mirrors the compose `migrate` -> `seed` dependency. Re-runnable: migrate is idempotent and
-# seed imports by pack. Recreate the Job to re-run (Jobs are immutable) — the deploy workflow
-# deletes-then-applies it.
+# One-shot: apply migrations (advisory-locked), then PULL a published content version from the external
+# content store (telosMUD-content) into Postgres. Ordered within a single pod: telos-migrate as an
+# initContainer, telos-pull as the main container. Re-runnable: migrate is idempotent and telos-pull
+# imports the manifest's packs atomically (pruning packs a prior version dropped) + broadcasts a
+# hot-reload. Recreate the Job to re-run (Jobs are immutable) — the deploy workflow deletes-then-applies it.
+# (Replaces the old telos-seed, which imported the engine's EMBEDDED demo fixture.)
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -26,9 +27,18 @@ spec:
                   name: telos-secrets
                   key: TELOS_POSTGRES_DSN
       containers:
-        - name: seed
-          image: ghcr.io/OWNER/telos-seed
+        - name: pull
+          image: ghcr.io/OWNER/telos-pull
+          envFrom:
+            - configMapRef:
+                name: telos-config # TELOS_NATS_URL for the post-import hot-reload broadcast
           env:
+            # The external content store + the published version to import. Bump TELOS_CONTENT_VERSION to
+            # roll staging to a newer content release (and recreate this Job — the deploy workflow does).
+            - name: TELOS_CONTENT_URL
+              value: "https://github.com/double-nibble/telosmud-content.git"
+            - name: TELOS_CONTENT_VERSION
+              value: "v0.2.0"
             - name: TELOS_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
