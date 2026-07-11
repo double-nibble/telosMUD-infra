@@ -11,19 +11,19 @@ resources:
 images:
   - name: ghcr.io/OWNER/telos-world
     newName: ghcr.io/double-nibble/telos-world
-    newTag: latest
+    newTag: sha-1321619
   - name: ghcr.io/OWNER/telos-gate
     newName: ghcr.io/double-nibble/telos-gate
-    newTag: latest
+    newTag: sha-1321619
   - name: ghcr.io/OWNER/telos-account
     newName: ghcr.io/double-nibble/telos-account
-    newTag: latest
+    newTag: sha-1321619
   - name: ghcr.io/OWNER/telos-migrate
     newName: ghcr.io/double-nibble/telos-migrate
-    newTag: latest
+    newTag: sha-1321619
   - name: ghcr.io/OWNER/telos-seed
     newName: ghcr.io/double-nibble/telos-seed
-    newTag: latest
+    newTag: sha-1321619
 
 patches:
   - path: patch-staging.yaml
