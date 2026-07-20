@@ -1,0 +1,50 @@
+name: validate
+
+# PR gate for the Kustomize manifests. `deploy.yml` applies to a LIVE cluster on push to main
+# (paths: k8s/**), with no checks in between — so this workflow is the safety net that must be green
+# before a merge: it renders every overlay and schema-validates the rendered output the same way the
+# deploy would build it. It does NOT touch any cluster (no kubeconfig, no apply).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kustomize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize + kubeconform
+        run: |
+          set -euo pipefail
+          # kustomize — pinned versioned asset (same discipline as deploy.yml: the upstream
+          # install_kustomize.sh GitHub-API probe intermittently fails to resolve the tarball).
+          KUSTOMIZE_VERSION=v5.4.3
+          curl -fsSLo kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz kustomize && sudo install kustomize /usr/local/bin/kustomize
+          KUBECONFORM_VERSION=v0.6.7
+          curl -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform && sudo install kubeconform /usr/local/bin/kubeconform
+
+      - name: Render + validate every overlay
+        run: |
+          set -euo pipefail
+          # Validate against a real Kubernetes schema version. CRDs (Traefik Middleware, cert-manager
+          # Certificate) have no built-in schema, so -ignore-missing-schemas skips THOSE while still
+          # strictly validating every core resource. -strict rejects unknown fields (a typo'd key).
+          for overlay in k8s/overlays/*/; do
+            echo "==> kustomize build ${overlay}"
+            kustomize build "${overlay}" > /tmp/rendered.yaml
+            echo "==> kubeconform ${overlay}"
+            kubeconform \
+              -kubernetes-version 1.30.0 \
+              -strict \
+              -ignore-missing-schemas \
+              -summary \
+              /tmp/rendered.yaml
+          done
