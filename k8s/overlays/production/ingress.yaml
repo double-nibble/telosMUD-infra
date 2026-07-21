@@ -14,10 +14,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - mud.example.com # TODO: your prod domain
+        - telos.double-nibble.com
       secretName: web-tls
   rules:
-    - host: mud.example.com # TODO: your prod domain
+    - host: telos.double-nibble.com
       http:
         paths:
           - path: /
@@ -37,7 +37,7 @@ metadata:
 spec:
   secretName: gate-tls
   dnsNames:
-    - mud.example.com # TODO: your prod domain (players `telnet`/TLS to this host:4000)
+    - telos.double-nibble.com # players `telnet`/TLS to this host:4000
   issuerRef:
     name: letsencrypt
     kind: ClusterIssuer

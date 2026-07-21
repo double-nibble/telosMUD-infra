@@ -71,7 +71,7 @@ spec:
             - name: TELOS_WEB_SECURE_COOKIES
               value: "1"
             - name: TELOS_WEB_PUBLIC_URL
-              value: "https://mud.example.com" # TODO: your prod domain
+              value: "https://telos.double-nibble.com"
             - name: TELOS_ACCOUNT_CALLER_TOKEN
               valueFrom:
                 secretKeyRef:
