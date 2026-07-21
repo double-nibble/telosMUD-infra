@@ -22,11 +22,17 @@ permissions:
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    # Ties the job to a GitHub Environment: `staging` is unprotected (auto), `production` has a required
+    # reviewer → the run PAUSES for a one-click "Review deployments" approval before it starts. Production
+    # only appears here via workflow_dispatch (the matrix below is staging-only on PR/push), so a PR can
+    # never hang on the prod gate and prod plan+apply is always the deliberate, approved path.
+    environment: ${{ matrix.env }}
     strategy:
       fail-fast: false
       matrix:
-        # Manual dispatch targets the ONE chosen env; PR/push plan both (apply is gated per-env below).
-        env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging","production"]') }}
+        # workflow_dispatch targets the ONE chosen env (staging or production). PR + push run STAGING
+        # only — production is dispatch-only, so it's never planned/applied without the manual trigger.
+        env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging"]') }}
     defaults:
       run:
         working-directory: terraform/envs/${{ matrix.env }}
