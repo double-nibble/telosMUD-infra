@@ -18,3 +18,20 @@ data:
   TELOS_CONTENT_PACKS: "reference"
   # NOTE: TELOS_ZONES is service-specific (world = zones HOSTED; gate = spawn zone), so it is
   # set per-Deployment, not here.
+  # OTLP metrics/traces export (Observability 2, #7). Shared here so world, gate, and account all
+  # inherit it via envFrom — the k8s equivalent of compose's x-otel-env anchor. account is included
+  # deliberately: it serves the OAuth website, so its latency is player-visible. db-init also inherits
+  # it but is a short-lived import job, and a metrics exporter that can't reach the collector just logs
+  # a warning and no-ops (internal/obs), so that is harmless.
+  #
+  # The endpoint MUST carry a URL scheme: the OTel Go SDK parses OTEL_EXPORTER_OTLP_ENDPOINT as a URL,
+  # and a bare "otel-collector:4317" is read as scheme="otel-collector" with an EMPTY address, so the
+  # gRPC dial fails with "invalid target address" and metrics never leave the process. http:// selects
+  # plaintext gRPC on the in-cluster network (the collector is ClusterIP, not internet-exposed).
+  #
+  # No OTEL_METRIC_EXPORT_INTERVAL override: the SDK default (60s) is right for a long-running
+  # deployment on a 2-OCPU box (compose sets 5s only to keep sub-minute bot-swarm load runs fresh).
+  # Until the collector exists (#9) the exporter init fails, warns, and degrades to metrics-off —
+  # harmless, so this can land before the collector.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
