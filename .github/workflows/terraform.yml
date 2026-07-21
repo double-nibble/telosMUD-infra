@@ -95,6 +95,22 @@ jobs:
           echo "TF_VAR_ssh_private_key_path=$HOME/.ssh/telos" >> "$GITHUB_ENV"
           echo "TF_VAR_ssh_public_key_path=$HOME/.ssh/telos.pub" >> "$GITHUB_ENV"
 
+      # The k3s module's `data.local_file.kubeconfig` reads ./kubeconfig, which the fetch_kubeconfig
+      # provisioner only writes when the instance is (re)created — so on a steady-state CI run the file is
+      # absent and plan fails. The real kubeconfig already lives in the KUBECONFIG_<env> secret (deploy.yml
+      # uses it), so seed the file from there to satisfy the data source. Absent secret (e.g. prod not yet
+      # bootstrapped) → no file → that env's plan will flag it, which is the correct signal.
+      - name: Seed kubeconfig for the local_file data source
+        env:
+          KC: ${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}
+        run: |
+          if [ -n "${KC}" ]; then
+            printf '%s' "${KC}" | base64 -d > kubeconfig
+            chmod 600 kubeconfig
+          else
+            echo "::warning::No KUBECONFIG_${{ matrix.env }} secret; ./kubeconfig not seeded — plan may fail on data.local_file.kubeconfig for this env."
+          fi
+
       - name: Terraform init
         run: terraform init -input=false
 
