@@ -1,0 +1,198 @@
+# Default-deny ingress for the telosmud namespace, then explicit allows (#10). The cluster ships with
+# ZERO policies (allow-all pod-to-pod); this milestone added four internet-adjacent observability
+# workloads, and the account gRPC API runs tokenless in staging — so the goal is to stop in-cluster
+# LATERAL movement (a compromised obs pod calling account/postgres or reading Loki), NOT internet
+# exposure (the NodePort range isn't reachable; the security list opens only 22/80/443/4000/6443).
+#
+# INGRESS-only policies (egress stays open, so DNS/API/health work). Public/ingress-path ports
+# (gate:4000 via the svclb LoadBalancer; account:8080 + grafana:3000 via Traefik) are allowed from
+# broad/kube-system sources precisely so the LoadBalancer + kubelet-probe paths are never severed —
+# verified on the live cluster (telnet, OAuth web, cross-shard walk) before this landed.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {} # every pod in telosmud
+  policyTypes: [Ingress]
+  # no ingress rules => deny all ingress not permitted by a policy below (policies are additive/union)
+---
+# Datastores: only the game services (and the one-shot db-init) may reach them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres
+spec:
+  podSelector: { matchLabels: { app: postgres } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: world } }
+        - podSelector: { matchLabels: { app: account } }
+        - podSelector: { matchLabels: { app: db-init } }
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis
+spec:
+  podSelector: { matchLabels: { app: redis } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: world } }
+        - podSelector: { matchLabels: { app: gate } }
+        - podSelector: { matchLabels: { app: account } }
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nats
+spec:
+  podSelector: { matchLabels: { app: nats } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: world } }
+        - podSelector: { matchLabels: { app: gate } }
+        # db-init (telos-pull) broadcasts a best-effort post-import hot-reload over NATS; without this,
+        # a content roll against a RUNNING cluster silently serves stale content until a manual restart
+        # (the fresh-apply path doesn't hit it — #10 review). account does NOT dial NATS.
+        - podSelector: { matchLabels: { app: db-init } }
+      ports:
+        - { protocol: TCP, port: 4222 }
+---
+# world gRPC (Play stream): only the gate dials it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-world
+spec:
+  podSelector: { matchLabels: { app: world } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: gate } }
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# account: gRPC (:9100) from the gate; web (:8080) from Traefik (kube-system) for the OAuth site.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-account
+spec:
+  podSelector: { matchLabels: { app: account } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: gate } }
+      ports:
+        - { protocol: TCP, port: 9100 }
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# gate telnet (:4000) is the PUBLIC game port, reached via the klipper svclb LoadBalancer (a
+# hostNetwork pod forwarding from the node IP). Allow from anywhere so the LB path is never severed —
+# the netpol's job is lateral movement, and the gate is meant to be publicly reachable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gate
+spec:
+  podSelector: { matchLabels: { app: gate } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - { protocol: TCP, port: 4000 }
+---
+# Collector: OTLP ingest (:4317) from the game services; Prometheus scrape (:8889) from Prometheus.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otel-collector
+spec:
+  podSelector: { matchLabels: { app: otel-collector } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: world } }
+        - podSelector: { matchLabels: { app: gate } }
+        - podSelector: { matchLabels: { app: account } }
+      ports:
+        - { protocol: TCP, port: 4317 }
+    - from:
+        - podSelector: { matchLabels: { app: prometheus } }
+      ports:
+        - { protocol: TCP, port: 8889 }
+---
+# Loki (:3100): the collector pushes logs, Grafana queries. (F1 from #9's review: this closes the
+# interim flat-network exposure where ANY pod could read/write/delete Loki.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-loki
+spec:
+  podSelector: { matchLabels: { app: loki } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: otel-collector } }
+        - podSelector: { matchLabels: { app: grafana } }
+      ports:
+        - { protocol: TCP, port: 3100 }
+---
+# Prometheus (:9090): only Grafana queries it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus
+spec:
+  podSelector: { matchLabels: { app: prometheus } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: grafana } }
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# cert-manager HTTP-01 ACME solver: Traefik must reach the ephemeral solver pod (:8089) or Let's
+# Encrypt challenges fail — which under default-deny would silently break BOTH new certs (the #12
+# Grafana cert once DNS resolves) AND the ~60-day renewal of the existing account-web cert. The solver
+# pods are created dynamically in this namespace with this label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-acme-solver
+spec:
+  podSelector:
+    matchLabels: { acme.cert-manager.io/http01-solver: "true" }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports:
+        - { protocol: TCP, port: 8089 }
+---
+# Grafana (:3000): only Traefik (kube-system) fronts it — the #12 public ingress path.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana
+spec:
+  podSelector: { matchLabels: { app: grafana } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports:
+        - { protocol: TCP, port: 3000 }
