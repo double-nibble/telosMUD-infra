@@ -6,6 +6,7 @@ namespace: telosmud
 resources:
   - ../../base
   - ingress-staging.yaml
+  - grafana-ingress-staging.yaml # #12: public Grafana hostname + Traefik basicAuth middleware
 
 # Point image names at your GHCR owner; CI overwrites newTag with the built commit SHA.
 images:
@@ -32,3 +33,4 @@ images:
 
 patches:
   - path: patch-staging.yaml
+  - path: patch-grafana-staging.yaml # #12: root URL + secure cookies for the public hostname

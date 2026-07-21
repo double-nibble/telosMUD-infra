@@ -152,6 +152,30 @@ fires at 80% root-FS usage once the collector's hostmetrics feed lands.
 **Storage-at-rest note.** On single-node k3s the Loki/Grafana data sits on the node boot volume, so any
 volume snapshot is a PII export once logs ship — factor that into backup handling.
 
+**Collector host mount (prod decision).** The log/metric collector DaemonSet mounts the node `/`
+read-only for hostmetrics. It cannot write host files, but a collector RCE could *read* every root-owned
+file on the node, including other pods' secret volumes. Accepted on single-node staging; before prod,
+either accept it explicitly or source root-FS usage from node-exporter and drop the `/` mount.
+
+**Public Grafana (its own hostname behind Traefik basicAuth).** Two operator steps:
+
+1. **DNS A record (required before the cert issues):**
+   `grafana.staging.telos.double-nibble.com` → the node's reserved public IP, in the `double-nibble.com`
+   zone (managed outside this repo). cert-manager's HTTP-01 challenge and the hostname both need it; until
+   it exists the Ingress is live but `grafana-web-tls` stays pending.
+2. **basicAuth Secret (created out-of-band, like `telos-secrets`):**
+   ```sh
+   kubectl -n telosmud create secret generic grafana-basic-auth \
+     --from-literal=users="$(htpasswd -nbB telos "$(openssl rand -base64 18)")"
+   ```
+   This is the independent second gate in front of Grafana's own login (Grafana has a 2025 pre-auth-CVE
+   history — the middleware is the point). A missing Secret makes Traefik fail-closed (deny).
+
+**Grafana version + upgrade cadence.** Pinned to `grafana/grafana:12.1.1` (past the 2025 CVE-4123/6023/3260
+patch lines). An unattended Grafana on a public hostname is the mass-scan target profile — **bump the pin
+on each Grafana security release** (grafana.com/security) and redeploy; the pod restart is zero-downtime
+for a single-user staging box.
+
 ## Backups
 
 The `pg-backup` CronJob runs `pg_dump` to OCI Object Storage nightly. Restore by piping a dump
