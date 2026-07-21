@@ -57,7 +57,7 @@ spec:
         fsGroup: 472 # grafana runs as uid 472; own the SQLite volume
       containers:
         - name: grafana
-          image: grafana/grafana:12.1.1 # pinned patched release (post the 2025 CVE chain); upgrade cadence noted in RUNBOOK (#12)
+          image: grafana/grafana:12.4.2 # pinned patched release; past CVE-2026-27876 (crit RCE) — bumped from 12.1.1 before going public (#12). Upgrade cadence in RUNBOOK.
           env:
             # Admin password from a Secret — NEVER the admin/admin default. The Secret is created
             # out-of-band on the cluster (see RUNBOOK) since staging's SOPS path is off; a missing

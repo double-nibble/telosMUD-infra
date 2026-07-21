@@ -171,10 +171,12 @@ either accept it explicitly or source root-FS usage from node-exporter and drop 
    This is the independent second gate in front of Grafana's own login (Grafana has a 2025 pre-auth-CVE
    history — the middleware is the point). A missing Secret makes Traefik fail-closed (deny).
 
-**Grafana version + upgrade cadence.** Pinned to `grafana/grafana:12.1.1` (past the 2025 CVE-4123/6023/3260
-patch lines). An unattended Grafana on a public hostname is the mass-scan target profile — **bump the pin
-on each Grafana security release** (grafana.com/security) and redeploy; the pod restart is zero-downtime
-for a single-user staging box.
+**Grafana version + upgrade cadence.** Pinned to `grafana/grafana:12.4.2` — past the 2025 CVE-4123/6023/3260
+chain AND the 2026 CVE-2026-27876 critical RCE (SQL-expressions arbitrary file write; patched 12.1.10/
+12.4.2). An unattended Grafana on a public hostname is the mass-scan target profile — **bump the pin on
+each Grafana security release** (grafana.com/security) and redeploy; the pod restart is zero-downtime for
+a single-user staging box. This pin was already behind a critical RCE at the time it went public — treat
+the cadence as load-bearing, not aspirational.
 
 ## Backups
 
