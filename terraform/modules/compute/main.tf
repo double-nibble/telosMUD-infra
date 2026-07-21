@@ -13,8 +13,18 @@ locals {
     [for port in var.open_tcp_ports : "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"],
     [
       "netfilter-persistent save",
-      "until curl -sfL https://get.k3s.io -o /tmp/install-k3s.sh; do echo 'waiting for egress (reserved IP attach)'; sleep 3; done",
-      "INSTALL_K3S_EXEC=\"server --tls-san ${var.node_fqdn} --write-kubeconfig-mode 644\" sh /tmp/install-k3s.sh",
+      # The reserved public IP (egress) attaches a few seconds AFTER launch, so early-boot DNS
+      # fails ("Temporary failure resolving ..."). Gate on DNS actually resolving every host the
+      # install touches — get.k3s.io for the script AND update.k3s.io/github.com for the binary.
+      # Without github.com here, the script download can succeed in a resolve window that closes
+      # again before the installer fetches the binary, leaving k3s uninstalled.
+      "until getent hosts get.k3s.io update.k3s.io github.com >/dev/null 2>&1; do echo 'waiting for DNS/egress (reserved IP attach)'; sleep 3; done",
+      "until curl -sfL https://get.k3s.io -o /tmp/install-k3s.sh; do echo 'waiting for egress'; sleep 3; done",
+      # Retry the WHOLE install until the service is actually active: the installer downloads the
+      # k3s binary from github/update.k3s.io, and a transient egress blip there fails the install
+      # WITHOUT failing this runcmd — leaving the node k3s-less and the final wait below looping
+      # forever. Looping on `systemctl is-active` makes install failure self-healing.
+      "until INSTALL_K3S_EXEC=\"server --tls-san ${var.node_fqdn} --write-kubeconfig-mode 644\" sh /tmp/install-k3s.sh && systemctl is-active --quiet k3s; do echo 'k3s install incomplete (transient egress?) — retrying'; sleep 5; done",
       "until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do sleep 3; done",
     ],
   )
