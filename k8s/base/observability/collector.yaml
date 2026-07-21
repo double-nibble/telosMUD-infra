@@ -67,9 +67,22 @@ data:
         scrapers:
           filesystem:
             include_mount_points:
+              match_type: strict   # REQUIRED — without it the pipeline BUILD fails (crash-loop); `validate` misses this
               mount_points: ["/"]  # only the root FS matters for the disk-fill alert
     processors:
+      # memory_limiter FIRST in every pipeline: under a log burst the collector must shed load rather
+      # than OOM against its 512Mi cgroup limit (start_at:end means it resumes with only a small gap).
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 25
       batch: {}
+      # Stamp the node name (from the downward API via OTEL_RESOURCE_ATTRIBUTES) onto metrics so the #11
+      # disk alert's `sum by (host_name)` / annotation resolves to a real host instead of an empty label.
+      resourcedetection:
+        detectors: [env]
+        timeout: 5s
+        override: false
       k8sattributes:
         auth_type: serviceAccount
         passthrough: false
@@ -81,25 +94,39 @@ data:
             - k8s.deployment.name
             - k8s.node.name
         pod_association:
+          # filelog records carry k8s.pod.uid (the `container` operator extracts it from the log PATH);
+          # associate on that so k8sattributes can attach deployment/node too (ip/connection don't exist
+          # on file-based logs).
+          - sources: [{ from: resource_attribute, name: k8s.pod.uid }]
           - sources: [{ from: resource_attribute, name: k8s.pod.ip }]
           - sources: [{ from: connection }]
       # #454 defense-in-depth: even though the engine no longer logs raw player input unless
-      # TELOS_LOG_RAW_INPUT is set (which staging does not), DROP any log record that looks like a
-      # raw-input line before it reaches the durable store — so a future upstream regression still cannot
-      # persist a tell/chat/link-code. Precise (matches the specific #454 message + a raw key), so it
-      # never over-drops a legitimate line; error_mode ignore = a non-string body is simply not matched.
+      # TELOS_LOG_RAW_INPUT is set (which staging does not), DROP any log record carrying a raw-input
+      # value before it reaches the durable store — so a future upstream regression still cannot persist a
+      # tell/chat/link-code. ONE precise condition PER site (msg PREFIX so "command handler panicked; zone
+      # survived" matches, and the exact raw key for each — `arg` for a cast, `keywords` as a JSON array),
+      # so it drops only the raw variant, never a legitimate redacted line. error_mode ignore = a
+      # non-string body is simply not matched (kept). NOTE: this is world-engine-shaped only — it is NOT a
+      # general PII scrubber for account/postgres logs; the real control is upstream services not logging
+      # secrets. The filelog receiver reads ALL pods' logs on the node.
       filter/sensitive:
         error_mode: ignore
         logs:
           log_record:
-            - 'IsMatch(body, "\"msg\":\"(inbox: input|input received|unknown verb|dispatch|ability lifecycle: invoke|targeting: resolve|command handler panicked)\".*\"(line|text|keywords|verb)\":\"")'
+            - 'IsMatch(body, "\"msg\":\"inbox: input\".*\"line\":")'
+            - 'IsMatch(body, "\"msg\":\"input received\".*\"text\":")'
+            - 'IsMatch(body, "\"msg\":\"dispatch\".*\"line\":")'
+            - 'IsMatch(body, "\"msg\":\"unknown verb\".*\"verb\":\"")'
+            - 'IsMatch(body, "\"msg\":\"command handler panicked.*\"line\":")'
+            - 'IsMatch(body, "\"msg\":\"ability lifecycle: invoke\".*\"arg\":")'
+            - 'IsMatch(body, "\"msg\":\"targeting: resolve\".*\"keywords\":")'
     exporters:
       debug:
         verbosity: normal
       prometheus:
         endpoint: 0.0.0.0:8889
         resource_to_telemetry_conversion:
-          enabled: true            # keep host_name etc. as labels so the disk alert can group by host
+          enabled: true            # carry host.name (+ service.name) into labels so the disk alert can group by host
       # Loki OTLP endpoint gotcha (grafana/loki#14037): configure /otlp — the otlphttp exporter appends
       # /v1/logs itself. The full /otlp/v1/logs would become /otlp/v1/logs/v1/logs and 404.
       otlphttp/loki:
@@ -111,11 +138,11 @@ data:
       pipelines:
         metrics:
           receivers: [otlp, hostmetrics]
-          processors: [batch]
+          processors: [memory_limiter, resourcedetection, batch]
           exporters: [prometheus]
         logs:
           receivers: [filelog]
-          processors: [k8sattributes, filter/sensitive, batch]
+          processors: [memory_limiter, k8sattributes, filter/sensitive, batch]
           exporters: [otlphttp/loki]
 ---
 apiVersion: apps/v1
@@ -137,6 +164,14 @@ spec:
         - name: otel-collector
           image: otel/opentelemetry-collector-contrib:0.116.1 # bumped from 0.110.0 (container-log parser fixes)
           args: ["--config=/etc/otel/collector.yaml"]
+          env:
+            # Feed the node name to the resourcedetection(env) processor so hostmetrics carry host.name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "host.name=$(NODE_NAME)"
           ports:
             - { name: otlp-grpc, containerPort: 4317 }
             - { name: prom, containerPort: 8889 }
