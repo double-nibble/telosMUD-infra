@@ -15,6 +15,7 @@ resources:
   - gate.yaml
   - account.yaml
   - networkpolicy.yaml
+  - pg-backup.yaml
   # Observability 2 (#8): the LGTM backends (Loki + Prometheus + Grafana). The collector that feeds them
   # is #9; Grafana's public ingress + Traefik auth is #12.
   - observability

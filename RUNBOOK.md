@@ -330,8 +330,63 @@ the cadence as load-bearing, not aspirational.
 
 ## Backups
 
-The `pg-backup` CronJob runs `pg_dump` to OCI Object Storage nightly. Restore by piping a dump
-into the `postgres` pod's `psql`.
+The `pg-backup` CronJob (`k8s/base/pg-backup.yaml`) runs nightly at 03:17 UTC: an initContainer
+`pg_dump`s the DB (via `TELOS_POSTGRES_DSN` from `telos-secrets`) into a gzip, then an `aws-cli`
+container uploads it to OCI Object Storage (S3-compatible). This is the ONLY thing between a wiped
+boot volume and total data loss on this single-node/local-PVC topology.
+
+**Two operator steps activate it** (the CronJob deploys with the app, but its jobs fail with
+`CreateContainerConfigError: secret "backup-s3" not found` until you do this — deliberate, so it
+never silently backs up to nowhere):
+
+```sh
+# 1. Create the backup bucket ONCE per tenancy (out-of-band, like the tfstate bucket):
+oci os bucket create -ns <namespace> --compartment-id <compartment-ocid> --name telosmud-backups
+
+# 2. Create the `backup-s3` Secret in each cluster. Reuse (or make) an OCI Customer Secret Key —
+#    the same S3-compat credential kind the Terraform state backend uses (Console: Identity ->
+#    your user -> Customer Secret Keys). BACKUP_PREFIX separates envs in the shared bucket.
+kubectl -n telosmud create secret generic backup-s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
+  --from-literal=BACKUP_BUCKET=telosmud-backups \
+  --from-literal=BACKUP_S3_ENDPOINT=https://<namespace>.compat.objectstorage.<region>.oraclecloud.com \
+  --from-literal=BACKUP_PREFIX=production   # or `staging`
+```
+
+**Verify / run on demand:**
+
+```sh
+kubectl -n telosmud create job pg-backup-now --from=cronjob/pg-backup
+kubectl -n telosmud logs -f job/pg-backup-now -c dump     # "dumping database..." + a byte count
+kubectl -n telosmud logs -f job/pg-backup-now -c upload   # "backup complete: s3://telosmud-backups/..."
+oci os object list -ns <namespace> --bucket-name telosmud-backups --prefix production
+```
+
+**Restore** a dump into the running DB:
+
+```sh
+oci os object get -ns <namespace> --bucket-name telosmud-backups \
+  --name production/telosmud-<ts>.sql.gz --file - | gunzip \
+  | kubectl -n telosmud exec -i postgres-0 -c postgres -- psql "$TELOS_POSTGRES_DSN"
+```
+
+**Retention (optional, requires one IAM grant).** A 14-day object-expiry lifecycle rule keeps the
+bucket bounded, but OCI rejects `put-object-lifecycle-policy` (`InsufficientServicePermissions`)
+until you grant the Object Storage service principal access to the bucket:
+
+```
+# IAM policy statement (Console -> Policies), then apply the lifecycle rule:
+allow service objectstorage-<region> to manage object-family in compartment <name> where target.bucket.name='telosmud-backups'
+oci os object-lifecycle-policy put -ns <namespace> --bucket-name telosmud-backups --from-json '{"items":[{"name":"expire-old-backups","action":"DELETE","timeAmount":14,"timeUnit":"DAYS","isEnabled":true,"target":"objects"}]}'
+```
+
+> Notes. The dump waits (`pg_isready` poll) for postgres to be reachable before dumping — on k3s the
+> bundled kube-router netpol programs the `allow-postgres` rule for a new pod's IP a beat after start,
+> so an immediate connect is REJECTed. Single-node PVC snapshots are a PII export (see the
+> observability storage-at-rest note); the dumps in object storage are equally sensitive — scope the
+> bucket's access tightly. A managed/off-node Postgres would remove the single-node-loss exposure
+> entirely (bigger design question — tracked in issue #25).
 
 ## Teardown
 

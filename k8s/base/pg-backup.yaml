@@ -1,0 +1,99 @@
+# Nightly logical backup: pg_dump the game database, gzip it, and upload to OCI Object Storage
+# (S3-compatible). This is the ONLY thing standing between a wiped boot volume and total data loss
+# on this single-node/local-path-PVC topology — see issue #25 and RUNBOOK §Backups.
+#
+# Two stages in one pod so no credential ever touches the database container:
+#   initContainer `dump`   — postgres:16-alpine (MUST match the server major, k8s/base/postgres.yaml),
+#                            pg_dump via TELOS_POSTGRES_DSN into an emptyDir. Runs to completion first;
+#                            if it fails, the upload never runs (init-container ordering is the gate).
+#   container     `upload` — aws-cli to the OCI S3-compat endpoint. Reads its bucket/endpoint/creds
+#                            from the out-of-band `backup-s3` Secret (per-cluster; NOT in git). Until
+#                            that Secret exists the job fails — that's the deliberate signal to create
+#                            it (RUNBOOK §Backups), not a default that silently backs up nowhere.
+#
+# NetworkPolicy: the pod is labelled `app: pg-backup` so `allow-postgres` (networkpolicy.yaml) permits
+# it to reach postgres:5432; egress (to object storage :443) is unrestricted.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+spec:
+  schedule: "17 3 * * *" # 03:17 UTC nightly
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600 # if a node was down at 03:17, still run when it comes back within the hour
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app: pg-backup # allow-postgres NetworkPolicy keys off this
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            fsGroup: 65534
+          initContainers:
+            - name: dump
+              image: postgres:16-alpine
+              command: ["/bin/sh", "-euc"]
+              args:
+                - |
+                  # pipefail so a mid-stream pg_dump failure fails the stage (and skips the upload)
+                  # instead of shipping a truncated dump.
+                  set -o pipefail
+                  # Wait for postgres to be REACHABLE before dumping. On k3s the bundled netpol
+                  # controller (kube-router) programs the allow-postgres rule for THIS pod's IP a
+                  # beat after the pod starts, so an immediate connect gets REJECTed ("connection
+                  # refused"). Poll pg_isready until the path is open (also covers a briefly-down DB).
+                  echo "waiting for postgres reachability..."
+                  for i in $(seq 1 20); do
+                    pg_isready -q -d "$TELOS_POSTGRES_DSN" && break
+                    echo "  not ready yet (attempt $i)"; sleep 3
+                  done
+                  pg_isready -q -d "$TELOS_POSTGRES_DSN" || { echo "postgres unreachable after retries"; exit 1; }
+                  echo "dumping database..."
+                  pg_dump --no-owner --no-privileges "$TELOS_POSTGRES_DSN" | gzip -9 > /backup/dump.sql.gz
+                  ls -l /backup/dump.sql.gz
+              env:
+                - name: TELOS_POSTGRES_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: telos-secrets
+                      key: TELOS_POSTGRES_DSN
+              volumeMounts:
+                - name: scratch
+                  mountPath: /backup
+          containers:
+            - name: upload
+              image: amazon/aws-cli:2.17.18
+              command: ["/bin/sh", "-euc"]
+              args:
+                - |
+                  KEY="${BACKUP_PREFIX}/telosmud-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+                  echo "uploading s3://${BACKUP_BUCKET}/${KEY}"
+                  aws s3 cp /backup/dump.sql.gz "s3://${BACKUP_BUCKET}/${KEY}" \
+                    --endpoint-url "${BACKUP_S3_ENDPOINT}"
+                  echo "backup complete: s3://${BACKUP_BUCKET}/${KEY}"
+              envFrom:
+                - secretRef:
+                    name: backup-s3 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BACKUP_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_PREFIX
+              env:
+                # OCI's S3-compat endpoint does not implement aws-chunked trailing checksums (the AWS
+                # SDK/CLI enables them by default since 2025) — force checksums only when required, or
+                # PutObject 501s. Same quirk the Terraform s3 backend hits (see terraform.yml).
+                - name: AWS_REQUEST_CHECKSUM_CALCULATION
+                  value: WHEN_REQUIRED
+                - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+                  value: WHEN_REQUIRED
+              volumeMounts:
+                - name: scratch
+                  mountPath: /backup
+          volumes:
+            - name: scratch
+              emptyDir:
+                sizeLimit: 2Gi

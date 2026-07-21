@@ -31,6 +31,7 @@ spec:
         - podSelector: { matchLabels: { app: world } }
         - podSelector: { matchLabels: { app: account } }
         - podSelector: { matchLabels: { app: db-init } }
+        - podSelector: { matchLabels: { app: pg-backup } } # nightly pg_dump (pg-backup.yaml)
       ports:
         - { protocol: TCP, port: 5432 }
 ---
