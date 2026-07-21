@@ -116,11 +116,161 @@ telnet <node-public-ip> 4000
 curl -I https://staging.<domain>/
 ```
 
-## 6. Production differences
+## 6. Production bring-up (full walkthrough)
 
-- Use `terraform/envs/production` and `k8s/overlays/production`.
-- No `TELOS_DEV_AUTOAUTH`; TLS-only gate; real GitHub OAuth app + domain; secure cookies.
-- Confirm the single-node handoff-guard question in PLAN.md before dropping `TELOS_ALLOW_INSECURE`.
+Production differs from staging: `terraform/envs/production` + `k8s/overlays/production`, no
+`TELOS_DEV_AUTOAUTH` (compiled out of release images anyway), TLS-only gate, real GitHub OAuth app +
+domain, secure cookies, and a real handoff keypair instead of `TELOS_ALLOW_INSECURE`. Do staging
+first; this section is the exact order that worked, including the traps.
+
+> This was walked through end-to-end on 2026-07-21 to bring up `telos.double-nibble.com`. The steps
+> below are what actually happened, not an idealized plan.
+
+### 6.1 Provision the cluster
+
+```sh
+# Locally (sweeps ADs on capacity errors), or in CI:
+scripts/apply-with-retry.sh production
+#   gh workflow run terraform.yml -f env=production   # applies only from main; gated on the
+#                                                       # `production` GitHub Environment (manual approve)
+```
+
+Then capture the two outputs you need everywhere else:
+
+```sh
+cd terraform/envs/production
+terraform output -raw public_ip     # the RESERVED IP — your DNS target
+terraform output -raw kubeconfig > ./kubeconfig   # server is the fqdn, not the IP
+```
+
+### 6.2 If the apply hangs or you cancel it mid-run (recovery)
+
+A first apply can wedge for 10+ minutes on the k3s provisioner. The historical cause was a
+**cloud-init DNS race**: the instance has no ephemeral public IP, so the reserved IP (which provides
+egress) attaches a few seconds *after* boot — early-boot DNS fails, the k3s installer's binary
+download (`update.k3s.io`/`github.com`) fails, k3s never installs, and cloud-init spins forever in
+its final `until kubectl get nodes` loop, so `cloud-init status --wait` (the Terraform provisioner)
+never returns. `terraform/modules/compute` now gates on DNS + retries the install under a deadline,
+so a fresh apply should not hit this. If you inherit a wedged/partial apply anyway:
+
+```sh
+# 1. Is the VM actually up but k3s-less? (SSH works even when the provisioner is stuck)
+ssh -i ~/.ssh/telos_id_ed25519 ubuntu@<reserved-ip> \
+  'sudo cloud-init status; sudo systemctl is-active k3s; ls /etc/rancher/k3s/k3s.yaml'
+
+# 2. If k3s never installed (old image / DNS race), finish it by hand — DNS is up now.
+#    The wedged cloud-init loop self-completes once k3s is active, flipping status to `done`.
+ssh -i ~/.ssh/telos_id_ed25519 ubuntu@<reserved-ip> \
+  'sudo env INSTALL_K3S_EXEC="server --tls-san <fqdn> --write-kubeconfig-mode 644" sh /tmp/install-k3s.sh'
+
+# 3. A cancelled apply can persist the VM to state but leave the RESERVED IP orphaned (created in
+#    OCI, absent from state). Re-import it so the next apply adopts it instead of trying to recreate
+#    (which fails: the private IP already has an association):
+terraform import module.compute.oci_core_public_ip.reserved <publicip-ocid>
+#    If this errors on `data.local_file.kubeconfig` (open ./kubeconfig: no such file), the local
+#    kubeconfig the module reads is missing — seed it first, then re-run the import:
+ssh -i ~/.ssh/telos_id_ed25519 ubuntu@<reserved-ip> 'sudo cat /etc/rancher/k3s/k3s.yaml' \
+  | sed 's/127.0.0.1/<fqdn>/' > ./kubeconfig
+```
+
+Find the public-IP OCID with `oci network public-ip list --compartment-id <ocid> --scope REGION --all`.
+
+### 6.3 DNS — do this BEFORE deploying (hard prerequisite)
+
+```
+<fqdn>   A   <reserved-ip>
+```
+
+Nothing TLS works until this resolves: cert-manager's HTTP-01 challenge, the `gate-tls` cert the
+gate pod mounts, and the domain kubeconfig all need it. **The gate pod stays in `ContainerCreating`
+until `gate-tls` issues**, which can't happen without DNS — so deploying before DNS is set gives you
+a stuck rollout.
+
+### 6.4 Cluster add-ons
+
+```sh
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+kubectl -n cert-manager rollout status deploy/cert-manager-webhook   # wait before the next step
+kubectl apply -f k8s/addons/letsencrypt-issuer.yaml                  # ClusterIssuer (HTTP-01/Traefik)
+```
+
+### 6.5 Secrets (out-of-band; the SOPS path is off by default)
+
+```sh
+# CI needs the cluster kubeconfig to deploy:
+base64 -i terraform/envs/production/kubeconfig | gh secret set KUBECONFIG_PRODUCTION
+
+# Grafana refuses to start without an admin password (no default-cred Grafana):
+kubectl -n telosmud create secret generic grafana-admin \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+
+# telos-secrets. Random tokens are `openssl rand -base64 32`. POSTGRES_PASSWORD must match the
+# password embedded in TELOS_POSTGRES_DSN. The signing/handoff keys are Ed25519, base64-std
+# (private = 64-byte key or 32-byte seed; public = 32-byte). Generate a matching pair with:
+#   go run - <<'EOF'  # prints "<b64-priv> <b64-pub>"
+#   package main
+#   import ("crypto/ed25519";"crypto/rand";"encoding/base64";"fmt")
+#   func main(){pub,priv,_:=ed25519.GenerateKey(rand.Reader);e:=base64.StdEncoding.EncodeToString
+#   fmt.Println(e(priv),e(pub))}
+#   EOF
+kubectl -n telosmud create secret generic telos-secrets \
+  --from-literal=POSTGRES_PASSWORD=... \
+  --from-literal=TELOS_POSTGRES_DSN='postgres://telos:...@postgres:5432/telosmud?sslmode=disable' \
+  --from-literal=TELOS_WEB_SESSION_KEY=... --from-literal=TELOS_ACCOUNT_CALLER_TOKEN=... \
+  --from-literal=TELOS_ACCOUNT_SIGNING_KEY=... --from-literal=TELOS_ACCOUNT_VERIFY_KEY=... \
+  --from-literal=TELOS_HANDOFF_SIGNING_KEY=... --from-literal=TELOS_HANDOFF_VERIFY_KEY=... \
+  --from-literal=TELOS_GITHUB_CLIENT_ID=PLACEHOLDER --from-literal=TELOS_GITHUB_CLIENT_SECRET=PLACEHOLDER
+```
+
+Two easy-to-miss points:
+
+- **`TELOS_ACCOUNT_VERIFY_KEY` must be wired into the WORLD, not just the account** (the prod overlay
+  does this). Without the verify key the shard's `verifyKey` is nil and it **silently skips
+  session-assertion verification** — trusting the gate's asserted identity blindly and never applying
+  builder/admin tier or instanced-zone minting. `session-assertion verification enabled (ed25519)` in
+  the world log is the proof it's on.
+- **No GHCR pull secret is needed** — the `ghcr.io/double-nibble/*` packages are public, so the
+  `imagePullSecrets: [ghcr]` reference in `base/rbac.yaml` is simply ignored.
+
+**GitHub OAuth app (prod-specific — staging's can't be reused):** create an OAuth app with callback
+`https://<fqdn>/auth/github/callback`, then inject the credentials **without putting the secret in a
+shell history / chat** by patching the placeholders:
+
+```sh
+kubectl -n telosmud patch secret telos-secrets --type=merge \
+  -p '{"stringData":{"TELOS_GITHUB_CLIENT_ID":"...","TELOS_GITHUB_CLIENT_SECRET":"..."}}'
+```
+
+### 6.6 Deploy
+
+```sh
+gh workflow run deploy.yml -f env=production   # manual-only for prod; staging auto-deploys on push
+```
+
+The workflow recreates `db-init` (migrate + content import), then waits on the world/gate/account
+rollouts. Order is handled by the manifests.
+
+### 6.7 Verify end-to-end
+
+```sh
+curl -I https://<fqdn>/                                   # 200, Let's Encrypt cert
+kubectl -n telosmud get certificate                       # gate-tls + web-tls -> READY True
+kubectl -n telosmud logs deploy/account | grep oauth      # "oauth broker listening" ... "oauth":true
+kubectl -n telosmud logs deploy/world | grep -Ei 'verification|handoff|zones'
+#   -> "session-assertion verification enabled (ed25519)", "cross-shard handoff ... (ed25519)",
+#      "content loaded ... zones:N"
+echo | openssl s_client -connect <fqdn>:4000 -servername <fqdn> 2>/dev/null | openssl x509 -noout -subject
+```
+
+### 6.8 Known cosmetics / follow-ups
+
+- Services log `"env":"dev"` in prod. It is **cosmetic** — the insecure allowance is gated on
+  `TELOS_ALLOW_INSECURE` (never `cfg.Env`) and dev-autoauth is compiled out of release images. Set
+  `TELOS_ENV=production` in the overlay if you want the label to match.
+- The out-of-band Secrets (`telos-secrets`, `grafana-admin`) live only in the cluster. For durability
+  and disaster recovery, move them under SOPS + git (see `.sops.yaml` / §3) once the box is stable.
+- Confirm the single-node handoff-guard reasoning in PLAN.md — resolved for a Redis-backed shard: it
+  supplies a real handoff keypair, so it boots with authenticated handoffs and `AllowInsecure=false`.
 
 ## Observability (LGTM)
 
