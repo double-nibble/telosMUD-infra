@@ -101,10 +101,13 @@ jobs:
       - name: Terraform plan
         run: terraform plan -input=false -no-color
 
-      # STAGING auto-applies on push to main. PRODUCTION applies ONLY via manual workflow_dispatch
-      # (its env isn't in the push matrix, so on push this step never even runs for prod).
+      # APPLY ONLY EVER RUNS FROM main. Everything else — PRs and workflow_dispatch triggered from a
+      # feature branch — runs init + plan and stops (the plan step above has no such guard). staging
+      # auto-applies on push to main; production applies via workflow_dispatch, which is also pinned to
+      # main so you can't apply a feature branch's terraform. (Non-main pushes don't trigger at all.)
       - name: Terraform apply
         if: >-
-          (matrix.env == 'staging' && github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          github.event_name == 'workflow_dispatch'
+          github.ref == 'refs/heads/main' &&
+          ((github.event_name == 'push' && matrix.env == 'staging') ||
+           github.event_name == 'workflow_dispatch')
         run: terraform apply -input=false -auto-approve
