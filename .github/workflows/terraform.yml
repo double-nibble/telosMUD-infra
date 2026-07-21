@@ -54,6 +54,24 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
+      # The OCI Terraform provider authenticates from ~/.oci/config (API-key/DEFAULT profile), the same
+      # as a local run — it does NOT read the OCI_CLI_* env vars (those are for the `oci` CLI). Write the
+      # config + key from the secrets so the provider block (region = var.region) resolves credentials.
+      - name: Write OCI provider config
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
       # The instance-authorized-keys var + the kubeconfig-fetch provisioner both read key files by PATH.
       # Write the private key from the secret, derive its public key, and point the path vars at them.
       - name: Set up SSH key
