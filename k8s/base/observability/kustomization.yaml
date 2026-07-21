@@ -9,3 +9,4 @@ resources:
   - loki.yaml
   - prometheus.yaml
   - grafana.yaml
+  - collector.yaml # #9: OTLP ingest + filelog->Loki + hostmetrics; the ingest point #7's env points at

@@ -1,0 +1,168 @@
+# OTel Collector (#9) — the single ingest + collection point on k3s:
+#   * OTLP receiver (:4317)  ← world/gate/account push metrics here (the otel-collector:4317 the #7
+#     ConfigMap points them at); re-exposed on :8889 for Prometheus to scrape.
+#   * filelog receiver       ← node container logs (/var/log/pods) → Loki over OTLP.
+#   * hostmetrics receiver   ← node filesystem usage → :8889, which feeds the #11 NodeDiskFillingUp alert.
+#
+# One DaemonSet does all three. On this single-node cluster a Deployment (OTLP) + DaemonSet (logs) would
+# collapse to the same thing; a DaemonSet also scales cleanly to N nodes (each node's OTLP ingest sits
+# behind the Service, each reads its OWN node's logs, each reports its OWN disk) — so the split buys
+# nothing here. It runs as root and host-mounts /var/log/pods (the log files are 0640 root:root) and /
+# (read-only, for hostmetrics); the SA token IS mounted because k8sattributes calls the API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+rules:
+  # k8sattributes needs to read pod/namespace/node metadata to tag logs so they join to metrics/traces.
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: telosmud
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  labels: { app: otel-collector }
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+      filelog:
+        include: [/var/log/pods/*/*/*.log]
+        include_file_path: true
+        start_at: end            # only new logs — never bulk-ingest history into Loki on first start
+        operators:
+          - type: container       # parses the CRI/containerd log format (bumped image: this operator has had fixes)
+      hostmetrics:
+        root_path: /hostfs        # the host root FS is mounted here so the scraper reports the node's real mountpoints
+        collection_interval: 60s
+        scrapers:
+          filesystem:
+            include_mount_points:
+              mount_points: ["/"]  # only the root FS matters for the disk-fill alert
+    processors:
+      batch: {}
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.deployment.name
+            - k8s.node.name
+        pod_association:
+          - sources: [{ from: resource_attribute, name: k8s.pod.ip }]
+          - sources: [{ from: connection }]
+      # #454 defense-in-depth: even though the engine no longer logs raw player input unless
+      # TELOS_LOG_RAW_INPUT is set (which staging does not), DROP any log record that looks like a
+      # raw-input line before it reaches the durable store — so a future upstream regression still cannot
+      # persist a tell/chat/link-code. Precise (matches the specific #454 message + a raw key), so it
+      # never over-drops a legitimate line; error_mode ignore = a non-string body is simply not matched.
+      filter/sensitive:
+        error_mode: ignore
+        logs:
+          log_record:
+            - 'IsMatch(body, "\"msg\":\"(inbox: input|input received|unknown verb|dispatch|ability lifecycle: invoke|targeting: resolve|command handler panicked)\".*\"(line|text|keywords|verb)\":\"")'
+    exporters:
+      debug:
+        verbosity: normal
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        resource_to_telemetry_conversion:
+          enabled: true            # keep host_name etc. as labels so the disk alert can group by host
+      # Loki OTLP endpoint gotcha (grafana/loki#14037): configure /otlp — the otlphttp exporter appends
+      # /v1/logs itself. The full /otlp/v1/logs would become /otlp/v1/logs/v1/logs and 404.
+      otlphttp/loki:
+        endpoint: http://loki:3100/otlp
+    service:
+      telemetry:
+        logs:
+          level: warn
+      pipelines:
+        metrics:
+          receivers: [otlp, hostmetrics]
+          processors: [batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [filelog]
+          processors: [k8sattributes, filter/sensitive, batch]
+          exporters: [otlphttp/loki]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  selector:
+    matchLabels: { app: otel-collector }
+  template:
+    metadata:
+      labels: { app: otel-collector }
+    spec:
+      serviceAccountName: otel-collector
+      securityContext:
+        runAsUser: 0 # /var/log/pods files are 0640 root:root — root is required to read node logs
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.116.1 # bumped from 0.110.0 (container-log parser fixes)
+          args: ["--config=/etc/otel/collector.yaml"]
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: prom, containerPort: 8889 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/otel }
+            - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+            - { name: hostfs, mountPath: /hostfs, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: otel-collector-config }
+        - name: varlogpods
+          hostPath: { path: /var/log/pods }
+        - name: hostfs
+          hostPath: { path: / }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  type: ClusterIP
+  selector: { app: otel-collector }
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: prom, port: 8889, targetPort: prom }
