@@ -35,6 +35,12 @@ jobs:
       TF_VAR_region: ${{ secrets.OCI_REGION }}
       TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
       TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
+      # The other required vars (no defaults) — identifiers, not secrets, but stored as secrets to keep
+      # the OCIDs out of the public repo. image_ocid is region-specific and ages out; bump it when the
+      # base image is deprecated (bootstrap-local.sh discovers the newest locally). ssh key PATHS are set
+      # in the SSH-key step below to the CI-created files.
+      TF_VAR_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+      TF_VAR_image_ocid: ${{ secrets.OCI_IMAGE_OCID }}
       OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
       OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
       OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
@@ -48,11 +54,15 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      # The kubeconfig-fetch provisioner SSHes to the VM; provide the private key.
+      # The instance-authorized-keys var + the kubeconfig-fetch provisioner both read key files by PATH.
+      # Write the private key from the secret, derive its public key, and point the path vars at them.
       - name: Set up SSH key
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/telos && chmod 600 ~/.ssh/telos
+          printf '%s\n' "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/telos && chmod 600 ~/.ssh/telos
+          ssh-keygen -y -f ~/.ssh/telos > ~/.ssh/telos.pub
+          echo "TF_VAR_ssh_private_key_path=$HOME/.ssh/telos" >> "$GITHUB_ENV"
+          echo "TF_VAR_ssh_public_key_path=$HOME/.ssh/telos.pub" >> "$GITHUB_ENV"
 
       - name: Terraform init
         run: terraform init -input=false
