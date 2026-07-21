@@ -1,12 +1,20 @@
 name: terraform
 
-# Plan on PRs, apply on merge to main. Matrixed over both environments.
+# PR: plan both envs (review). Push to main: apply STAGING only. Production apply is MANUAL
+# (workflow_dispatch, env=production) so a terraform/** push can never touch prod — prod is deferred.
 on:
   pull_request:
     paths: ["terraform/**"]
   push:
     branches: [main]
     paths: ["terraform/**"]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to plan + apply"
+        type: choice
+        options: [staging, production]
+        default: staging
 
 permissions:
   contents: read
@@ -15,8 +23,10 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        env: [staging, production]
+        # Manual dispatch targets the ONE chosen env; PR/push plan both (apply is gated per-env below).
+        env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging","production"]') }}
     defaults:
       run:
         working-directory: terraform/envs/${{ matrix.env }}
@@ -50,6 +60,10 @@ jobs:
       - name: Terraform plan
         run: terraform plan -input=false -no-color
 
+      # STAGING auto-applies on push to main. PRODUCTION applies ONLY via manual workflow_dispatch
+      # (its env isn't in the push matrix, so on push this step never even runs for prod).
       - name: Terraform apply
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: >-
+          (matrix.env == 'staging' && github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'workflow_dispatch'
         run: terraform apply -input=false -auto-approve
