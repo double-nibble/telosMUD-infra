@@ -43,6 +43,16 @@ spec:
       containers:
         - name: world
           env:
+            # Account's Ed25519 PUBLIC key. WITHOUT this the shard's verifyKey is nil and it
+            # SKIPS session-assertion verification entirely — trusting the gate's asserted
+            # identity blindly (dev/pre-14.3 behavior) and never applying builder/admin tier or
+            # instanced-zone minting. Required for prod to actually enforce the signed assertions
+            # this overlay claims. Pairs with account's TELOS_ACCOUNT_SIGNING_KEY below.
+            - name: TELOS_ACCOUNT_VERIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telos-secrets
+                  key: TELOS_ACCOUNT_VERIFY_KEY
             # Prod uses a real handoff keypair instead of TELOS_ALLOW_INSECURE. NOTE: a single
             # shard never hands off — verify whether the boot guard still requires these
             # (PLAN.md open item). If it does not, they are harmless; if the guard rejects a
