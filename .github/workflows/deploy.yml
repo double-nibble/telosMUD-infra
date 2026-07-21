@@ -27,6 +27,11 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Ties the job to a GitHub Environment. `staging` has no protection → deploys immediately on push.
+    # `production` has a required reviewer → the run PAUSES with a "Review deployments" button that must
+    # be approved before this job starts. Production only ever appears here via workflow_dispatch (the
+    # matrix below is staging-only on push), so the gate is the deliberate one-click prod approval.
+    environment: ${{ matrix.env }}
     strategy:
       matrix:
         # On push, deploy staging only; production is manual (workflow_dispatch) for safety.
