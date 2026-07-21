@@ -76,8 +76,17 @@ resource "oci_core_instance" "this" {
   }
 
   # A1 free capacity is intermittent; ignore image drift so a re-apply doesn't rebuild.
+  #
+  # ALSO ignore `metadata` — on OCI, changing `user_data` (or the ssh key) FORCES REPLACEMENT.
+  # This is a stateful single-node k3s box: postgres/redis/grafana live on local-path PVCs on the
+  # boot volume, so an instance replace WIPES all data. A cloud-init edit (modules/compute) that
+  # merged to main once recreated the staging VM via the push-triggered apply and destroyed its
+  # database. Ignoring metadata means a user_data edit never silently destroys a live instance.
+  # To intentionally roll a new cloud-init onto an instance, recreate it DELIBERATELY (after a
+  # backup): `terraform apply -replace=module.compute.oci_core_instance.this` — a targeted replace
+  # uses the current config's user_data, so the new box still gets the latest bootstrap.
   lifecycle {
-    ignore_changes = [source_details[0].source_id]
+    ignore_changes = [source_details[0].source_id, metadata]
   }
 }
 
