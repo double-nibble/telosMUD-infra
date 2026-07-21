@@ -122,6 +122,36 @@ curl -I https://staging.<domain>/
 - No `TELOS_DEV_AUTOAUTH`; TLS-only gate; real GitHub OAuth app + domain; secure cookies.
 - Confirm the single-node handoff-guard question in PLAN.md before dropping `TELOS_ALLOW_INSECURE`.
 
+## Observability (LGTM)
+
+The `k8s/base/observability/` backends (Loki + Prometheus + Grafana; Tempo is deferred to the tracing
+milestone) are deployed by the normal `kubectl apply -k` flow. Grafana is ClusterIP here — its public
+hostname + Traefik auth middleware are a separate change.
+
+**Grafana admin password (required before first deploy).** Grafana reads its admin password from the
+`grafana-admin` Secret; a missing Secret makes the pod fail to start (deliberate — no default-cred
+Grafana). Staging's SOPS path is off, so create it out-of-band once, like `telos-secrets`:
+
+```sh
+kubectl -n telosmud create secret generic grafana-admin \
+  --from-literal=admin-password="$(openssl rand -base64 24)"
+# Retrieve it to log in / rotate:
+kubectl -n telosmud get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+```
+
+**Retention & disk (the load-bearing part).** local-path PVCs do NOT enforce their requested size —
+they are directories on the 50 GB node root FS, so an unbounded Loki/Prometheus fills `/` and takes the
+whole game stack down. Retention is therefore configured before first ingest: Loki
+`compactor.retention_enabled: true` + 7d, Prometheus `--storage.tsdb.retention.time=7d` **and**
+`.size=2GB` (size retention is what saves you during a cardinality blowup). The observability PVC budget
+is ~7Gi (Loki 3Gi + Prometheus 3Gi + Grafana 1Gi); with the existing 15Gi (postgres+nats) that is ~22Gi
+of ~45Gi free — **the boot volume is deliberately NOT raised** (verified 45 GB free; raising it is a
+Terraform change that risks an instance rebuild for no need). The `NodeDiskFillingUp` Prometheus alert
+fires at 80% root-FS usage once the collector's hostmetrics feed lands.
+
+**Storage-at-rest note.** On single-node k3s the Loki/Grafana data sits on the node boot volume, so any
+volume snapshot is a PII export once logs ship — factor that into backup handling.
+
 ## Backups
 
 The `pg-backup` CronJob runs `pg_dump` to OCI Object Storage nightly. Restore by piping a dump

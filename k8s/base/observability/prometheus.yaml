@@ -1,0 +1,117 @@
+# Prometheus (#8) — local TSDB, scrapes the otel-collector's Prometheus exporter (:8889) for the
+# services' OTLP metrics. Retention is pinned on BOTH time and size (#8): size retention is what saves
+# the node during a cardinality explosion, which is exactly when time-based retention fails.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels: { app: prometheus }
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+    scrape_configs:
+      # The services push OTLP to the collector; the collector re-exposes them on :8889 (#9). Until the
+      # collector Service exists this target is simply DOWN — Prometheus starts fine and picks it up when
+      # #9 lands. (Obs 3 may switch this to remote-write for exemplars — #469.)
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["otel-collector:8889"]
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+  rules.yaml: |
+    groups:
+      - name: node-disk
+        rules:
+          # #11: the failure mode this whole milestone guards against is a full node root FS (an unbounded
+          # Loki/Prometheus filling / and taking the game stack down). The collector's hostmetrics receiver
+          # (#9) reports system_filesystem_usage{state=used|free} for the node root mount; alert when the
+          # root FS crosses 80%. Fires into Prometheus/Grafana once #9 feeds the metric (there is no
+          # Alertmanager routing on this box — "firing + visible in Grafana" is the bar #11 sets).
+          - alert: NodeDiskFillingUp
+            expr: |
+              sum by (host_name) (system_filesystem_usage_bytes{mountpoint="/", state="used"})
+              /
+              sum by (host_name) (system_filesystem_usage_bytes{mountpoint="/"})
+              > 0.80
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "Node root filesystem over 80% on {{ $labels.host_name }}"
+              description: "local-path PVCs are unbounded directories on / — an observability ingest bug fills the disk and takes the game stack down. Check Loki/Prometheus/Tempo on-disk growth vs retention."
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  labels: { app: prometheus }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 3Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels: { app: prometheus }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      # Prometheus never calls the Kubernetes API, so don't mount a namespace SA token it could leak if
+      # compromised (defense-in-depth, security review F3).
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 65534 # prometheus runs as nobody(65534); own the TSDB volume
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.4.2 # arm64-verified
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/data
+            - --storage.tsdb.retention.time=7d
+            - --storage.tsdb.retention.size=2GB # size cap saves the node during a cardinality blowup
+            # NOTE: --web.enable-lifecycle deliberately OMITTED — nothing reloads Prometheus at runtime,
+            # and on the (interim) flat network it would expose an unauthenticated POST /-/quit remote
+            # kill. Reload the config by restarting the pod instead (security review F2).
+          ports:
+            - { name: http, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
+            - { name: config, mountPath: /etc/prometheus/rules/rules.yaml, subPath: rules.yaml }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        - name: data
+          persistentVolumeClaim: { claimName: prometheus-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels: { app: prometheus }
+spec:
+  type: ClusterIP
+  selector: { app: prometheus }
+  ports:
+    - { name: http, port: 9090, targetPort: http }
