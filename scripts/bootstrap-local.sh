@@ -1,127 +1,52 @@
 #!/usr/bin/env bash
 #
-# bootstrap-local.sh — populate local Terraform tfvars from your configured OCI CLI.
+# bootstrap-local.sh — write local Terraform tfvars for both envs from your AWS CLI defaults.
 #
-# Idempotent: safe to run repeatedly. It DISCOVERS your tenancy identifiers via the OCI CLI
-# (tenancy, region, compartment, availability domain, object-storage namespace, and the newest
-# Ubuntu 22.04 arm64 image) and writes them into the gitignored
-# terraform/envs/{staging,production}/terraform.tfvars. It also creates the local SSH keypair
-# if it is missing.
+# Idempotent: safe to run repeatedly. AWS EKS needs far fewer identifiers than the old OCI setup —
+# Terraform authenticates from your ambient AWS credentials (`aws configure` / SSO / env vars) and
+# the module defaults cover everything else. This just stamps a region into the gitignored
+# terraform/envs/{staging,production}/terraform.tfvars so a re-apply is reproducible; edit the file
+# afterwards if you want a non-default node size / VPC CIDR.
 #
-# No secrets are written or required here — Terraform authenticates from your ~/.oci/config.
-# A collaborator just needs `oci setup config` done, then runs this. Nothing is hand-delivered.
-#
-# Prereqs: the `oci` CLI, configured and able to read your compartment.
+# Prereqs: the `aws` CLI, configured (`aws configure` or an SSO/role profile).
 #
 # Usage:
 #   scripts/bootstrap-local.sh
 #
 # Optional env overrides:
-#   OCI_CLI_PROFILE     profile in ~/.oci/config                 (default: DEFAULT)
-#   TELOS_COMPARTMENT   compartment display-name to deploy into  (default: telosmud;
-#                       falls back to the tenancy root if not found)
-#   TELOS_AD            availability domain name                 (default: first AD in region)
-#   TELOS_SSH_KEY       SSH private key path                     (default: ~/.ssh/telos_id_ed25519)
+#   AWS_PROFILE   AWS CLI profile to read the region from   (default: the CLI's active profile)
+#   TELOS_REGION  override the region                       (default: `aws configure get region`)
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROFILE="${OCI_CLI_PROFILE:-DEFAULT}"
-CONFIG="${OCI_CLI_CONFIG_FILE:-$HOME/.oci/config}"
-COMPARTMENT_NAME="${TELOS_COMPARTMENT:-telosmud}"
 
 die() { echo "error: $*" >&2; exit 1; }
-info() { echo "  $*"; }
-require() { [ -n "${2:-}" ] || die "could not discover $1 — check your OCI CLI setup / permissions"; }
 
-command -v oci >/dev/null 2>&1 || die "the 'oci' CLI is not on PATH — install it and run 'oci setup config'"
-[ -f "$CONFIG" ] || die "no OCI config at $CONFIG — run 'oci setup config'"
+command -v aws >/dev/null 2>&1 || die "the 'aws' CLI is not on PATH — install it and run 'aws configure'"
 
-# Read a key from the active profile section of ~/.oci/config.
-cfg_get() {
-  awk -v prof="[$PROFILE]" -v key="$1" '
-    $0 == prof { inb = 1; next }
-    /^\[/      { inb = 0 }
-    inb && $0 ~ "^" key "[ \t]*=" { sub("^" key "[ \t]*=[ \t]*", ""); gsub(/[ \t\r]/, ""); print; exit }
-  ' "$CONFIG"
-}
+REGION="${TELOS_REGION:-$(aws configure get region || true)}"
+[ -n "$REGION" ] || REGION="us-east-1"
+echo "==> region: $REGION"
 
-# oci discovery helper: run a query, strip the known py3.14 SyntaxWarning noise, trim.
-ociq() { oci "$@" 2>/dev/null | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
-
-# Extract the string elements of a JSON array (one per line). --raw-output leaves the [ ] and
-# quotes on array results, so a JMESPath list query needs this to become plain lines.
-arr_strings() { sed -n 's/^"\(.*\)",\{0,1\}$/\1/p'; }
-
-echo "==> Discovering OCI identifiers (profile: $PROFILE)"
-
-TENANCY="$(cfg_get tenancy)";                             require "tenancy OCID"        "$TENANCY"
-REGION="${OCI_CLI_REGION:-$(cfg_get region)}";            require "region"              "$REGION"
-info "tenancy   $TENANCY"
-info "region    $REGION"
-
-NAMESPACE="$(ociq os ns get --query data --raw-output)";  require "object-storage namespace" "$NAMESPACE"
-info "namespace $NAMESPACE"
-
-AD="${TELOS_AD:-$(ociq iam availability-domain list --query 'data[0].name' --raw-output)}"
-require "availability domain" "$AD"
-info "AD        $AD"
-
-# Compartment by display-name, case-INSENSITIVE (subtree search); fall back to the tenancy root.
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-COMPARTMENT=""; MATCHED=""
-while IFS='|' read -r cname cid; do
-  [ -n "$cname" ] || continue
-  if [ "$(lower "$cname")" = "$(lower "$COMPARTMENT_NAME")" ]; then
-    COMPARTMENT="$cid"; MATCHED="$cname"; break
-  fi
-done < <(ociq iam compartment list --compartment-id "$TENANCY" \
-  --compartment-id-in-subtree true --all \
-  --query "data[?\"lifecycle-state\"=='ACTIVE'].join('|',[name,id])" --raw-output | arr_strings)
-
-if [ -n "$COMPARTMENT" ]; then
-  info "compartment $COMPARTMENT ($MATCHED)"
-else
-  echo "  warn: no compartment matching '$COMPARTMENT_NAME' — using the tenancy root." >&2
-  echo "        available compartments (set TELOS_COMPARTMENT to one of these):" >&2
-  ociq iam compartment list --compartment-id "$TENANCY" --compartment-id-in-subtree true --all \
-    --query "data[?\"lifecycle-state\"=='ACTIVE'].name" --raw-output | arr_strings | sed 's/^/          - /' >&2
-  COMPARTMENT="$TENANCY"
-  info "compartment $COMPARTMENT (tenancy root)"
+# Sanity-check credentials so a misconfigured CLI fails here, not mid-apply.
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
+  echo "  warn: 'aws sts get-caller-identity' failed — configure the AWS CLI before 'terraform apply'." >&2
 fi
 
-# Newest Ubuntu 22.04 aarch64 image compatible with the A1 (Ampere) shape, in this region.
-IMAGE="$(ociq compute image list --compartment-id "$TENANCY" \
-  --operating-system "Canonical Ubuntu" --operating-system-version "22.04" \
-  --shape "VM.Standard.A1.Flex" --sort-by TIMECREATED --sort-order DESC \
-  --query "data[?contains(\"display-name\",'aarch64')] | [0].id" --raw-output)"
-require "Ubuntu 22.04 arm64 image OCID" "$IMAGE"
-info "image     $IMAGE"
-
-# Local SSH keypair for the VMs — generate if absent.
-SSH_KEY="${TELOS_SSH_KEY:-$HOME/.ssh/telos_id_ed25519}"
-SSH_KEY="${SSH_KEY/#\~/$HOME}"
-SSH_PUB="$SSH_KEY.pub"
-if [ ! -f "$SSH_KEY" ]; then
-  echo "==> Generating SSH keypair at $SSH_KEY"
-  mkdir -p "$(dirname "$SSH_KEY")"
-  ssh-keygen -t ed25519 -f "$SSH_KEY" -N '' -C "telos-oci" >/dev/null
-else
-  info "ssh key   $SSH_KEY (exists)"
-fi
+# Per-env VPC CIDRs (must not overlap if you ever peer them). Matches the variables.tf defaults.
+declare -A CIDR=( [staging]="10.10.0.0/16" [production]="10.20.0.0/16" )
 
 write_tfvars() {
   local env="$1" out="$REPO_ROOT/terraform/envs/$1/terraform.tfvars"
   cat > "$out" <<EOF
-# GENERATED by scripts/bootstrap-local.sh — re-run the script instead of hand-editing.
-# Identifiers only (no credentials; Terraform auth comes from ~/.oci/config). Gitignored.
-region               = "$REGION"
-tenancy_ocid         = "$TENANCY"
-compartment_ocid     = "$COMPARTMENT"
-availability_domain  = "$AD"
-image_ocid           = "$IMAGE"
-ssh_public_key_path  = "$SSH_PUB"
-ssh_private_key_path = "$SSH_KEY"
+# GENERATED by scripts/bootstrap-local.sh — re-run the script instead of hand-editing (or edit freely;
+# it is gitignored). Terraform auth comes from your AWS CLI environment, not from here.
+region             = "$REGION"
+cluster_version    = "1.30"
+vpc_cidr           = "${CIDR[$env]}"
+node_instance_type = "t4g.large" # t4g.xlarge (16 GB) if the LGTM stack OOMs
+node_ami_type      = "AL2023_ARM_64_STANDARD"
 EOF
   echo "  wrote $out"
 }
@@ -132,9 +57,9 @@ write_tfvars production
 
 cat <<EOF
 
-Done. Next:
-  1. (first run) comment out the backend "s3" block in terraform/envs/staging/backend.tf to use local state
-  2. cd terraform/envs/staging && terraform init && terraform apply
-  3. terraform output -raw kubeconfig > ~/.kube/telos-staging
-See RUNBOOK.md for the full path.
+Done. Next (see RUNBOOK.md for the full path):
+  0. (once) create the S3 state bucket + DynamoDB lock table named in backend.tf
+  1. cd terraform/envs/staging && terraform init && terraform apply
+  2. aws eks update-kubeconfig --name telos-staging --region $REGION
+  3. apply k8s/addons + secrets, then: kustomize build k8s/overlays/staging | kubectl apply -f -
 EOF

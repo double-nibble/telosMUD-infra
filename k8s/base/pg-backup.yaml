@@ -1,6 +1,6 @@
-# Nightly logical backup: pg_dump the game database (custom format) and upload to OCI Object
-# Storage (S3-compatible). This is the ONLY thing standing between a wiped boot volume and total
-# data loss on this single-node/local-path-PVC topology — see issue #25 and RUNBOOK §Backups.
+# Nightly logical backup: pg_dump the game database (custom format) and upload to S3. This is the
+# ONLY thing standing between a lost EBS volume and total data loss on this single-node topology —
+# see issue #25 and RUNBOOK §Backups. The bucket is provisioned by terraform/modules/cluster-bootstrap.
 #
 # Two stages in one pod so no credential ever touches the database container:
 #   initContainer `dump`   — postgres:16.14-alpine (MUST equal the server minor, k8s/base/postgres.yaml:
@@ -9,9 +9,10 @@
 #                            the dump actually contains table data (a green job on an empty/wrong DB is
 #                            worse than a red one). Runs to completion first; if it fails the upload
 #                            never runs (init-container ordering is the gate).
-#   container     `upload` — aws-cli to the OCI S3-compat endpoint, then SHREDS the local dump. Reads
-#                            bucket/endpoint/creds from the out-of-band `backup-s3` Secret (per-cluster;
-#                            NOT in git). Until that Secret exists the job fails loudly — the signal to
+#   container     `upload` — aws-cli to S3, then SHREDS the local dump. Reads bucket/creds from the
+#                            out-of-band `backup-s3` Secret (per-cluster; NOT in git — an IAM user with
+#                            put access to the bucket, or wire IRSA as a follow-up). Until that Secret
+#                            exists the job fails loudly — the signal to
 #                            wire it (RUNBOOK §Backups), not a default that backs up nowhere.
 #
 # Custom format (-Fc) over plain SQL is deliberate: restore is `pg_restore --clean --if-exists` onto
@@ -99,22 +100,13 @@ spec:
                 - |
                   KEY="${BACKUP_PREFIX}/telosmud-$(date -u +%Y%m%dT%H%M%SZ).dump"
                   echo "uploading s3://${BACKUP_BUCKET}/${KEY}"
-                  aws s3 cp /backup/dump.dump "s3://${BACKUP_BUCKET}/${KEY}" \
-                    --endpoint-url "${BACKUP_S3_ENDPOINT}"
+                  aws s3 cp /backup/dump.dump "s3://${BACKUP_BUCKET}/${KEY}"
                   # Shred the plaintext PII dump off the node as soon as it's uploaded.
                   rm -f /backup/dump.dump
                   echo "backup complete: s3://${BACKUP_BUCKET}/${KEY}"
               envFrom:
                 - secretRef:
-                    name: backup-s3 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BACKUP_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_PREFIX
-              env:
-                # OCI's S3-compat endpoint does not implement aws-chunked trailing checksums (the AWS
-                # SDK/CLI enables them by default since 2025) — force checksums only when required, or
-                # PutObject 501s. Same quirk the Terraform s3 backend hits (see terraform.yml).
-                - name: AWS_REQUEST_CHECKSUM_CALCULATION
-                  value: WHEN_REQUIRED
-                - name: AWS_RESPONSE_CHECKSUM_VALIDATION
-                  value: WHEN_REQUIRED
+                    name: backup-s3 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, BACKUP_BUCKET, BACKUP_PREFIX
               volumeMounts:
                 - name: scratch
                   mountPath: /backup

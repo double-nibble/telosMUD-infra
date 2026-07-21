@@ -1,41 +1,33 @@
-# Public Grafana (#12) — a SEPARATE hostname behind a Traefik auth middleware. This was an explicit
+# Public Grafana (#12) — a SEPARATE hostname behind an nginx basic-auth gate. This was an explicit
 # product decision (public access over ClusterIP + port-forward), so the auth layer below is the entire
 # basis on which it is safe: Grafana is a read-any-datasource proxy with a 2025 history of pre-auth
-# account-takeover CVEs, so a SECOND independent gate (Traefik basicAuth) sits in front of Grafana's own
-# login. Grafana itself is already hardened (admin pw from Secret, anon/signup/unsigned-plugins off,
-# pinned patched image) in k8s/base/observability/grafana.yaml.
+# account-takeover CVEs, so a SECOND independent gate (ingress-nginx basic auth) sits in front of
+# Grafana's own login. Grafana itself is already hardened (admin pw from Secret, anon/signup/unsigned-
+# plugins off, pinned patched image) in k8s/base/observability/grafana.yaml.
 #
 # Its OWN hostname on purpose — NOT a path on staging.telos.* — because that host routes `/` to
 # account:8080 (the OAuth site); bolting Grafana onto a path there risks shadowing the OAuth callback.
 #
-# ⚠️ DNS: an A record `grafana.staging.telos.double-nibble.com -> <node reserved public IP>` must exist
+# ⚠️ DNS: a CNAME `grafana.staging.telos.double-nibble.com -> <ingress-nginx NLB hostname>` must exist
 # for cert-manager's HTTP-01 challenge to succeed and for the host to resolve. That record is managed
 # outside this repo (the double-nibble.com zone), so it is an OPERATOR step — see RUNBOOK. Until it
-# exists the Ingress is live but the cert stays pending; the auth middleware can still be verified with a
-# Host header against the node IP.
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: grafana-auth
-spec:
-  basicAuth:
-    # htpasswd (bcrypt) in the `users` key of this Secret, created out-of-band on the cluster (staging's
-    # SOPS path is off) — NOT committed. See RUNBOOK. A missing Secret makes Traefik deny (fail-closed).
-    secret: grafana-basic-auth
-    realm: telosMUD observability
----
+# exists the Ingress is live but the cert stays pending; the auth gate can still be verified with a
+# Host header against the NLB hostname.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: grafana
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    # Attach the basicAuth middleware IN FRONT of Grafana. Format is <namespace>-<name>@kubernetescrd.
-    # This is the independent second gate: an unauthenticated request is refused here, before Grafana.
-    traefik.ingress.kubernetes.io/router.middlewares: telosmud-grafana-auth@kubernetescrd
+    # The independent second gate: ingress-nginx enforces HTTP basic auth BEFORE Grafana. The
+    # htpasswd lives under the `auth` key of the `grafana-basic-auth` Secret, created out-of-band on
+    # the cluster (staging's SOPS path is off) — NOT committed. See RUNBOOK. A missing Secret makes
+    # nginx return 503 (fail-closed).
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: grafana-basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "telosMUD observability"
 spec:
-  ingressClassName: traefik
+  ingressClassName: nginx
   tls:
     - hosts:
         - grafana.staging.telos.double-nibble.com

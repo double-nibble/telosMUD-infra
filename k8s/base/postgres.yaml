@@ -61,7 +61,7 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: local-path
+        storageClassName: gp3 # EBS gp3 (default SC, EBS CSI). AZ-locked — the node group is single-AZ.
         resources:
           requests:
             storage: 10Gi

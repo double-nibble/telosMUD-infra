@@ -42,7 +42,7 @@ data:
             labels: { severity: warning }
             annotations:
               summary: "Node root filesystem over 80% on {{ $labels.host_name }}"
-              description: "local-path PVCs are unbounded directories on / — an observability ingest bug fills the disk and takes the game stack down. Check Loki/Prometheus/Tempo on-disk growth vs retention."
+              description: "Node root filesystem filling on the single node (container images, logs, ephemeral storage). gp3 PVCs are separate EBS volumes, but a runaway emptyDir or image churn still fills /. Check on-disk growth vs retention."
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

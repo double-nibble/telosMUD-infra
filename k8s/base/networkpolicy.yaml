@@ -5,9 +5,10 @@
 # exposure (the NodePort range isn't reachable; the security list opens only 22/80/443/4000/6443).
 #
 # INGRESS-only policies (egress stays open, so DNS/API/health work). Public/ingress-path ports
-# (gate:4000 via the svclb LoadBalancer; account:8080 + grafana:3000 via Traefik) are allowed from
-# broad/kube-system sources precisely so the LoadBalancer + kubelet-probe paths are never severed —
-# verified on the live cluster (telnet, OAuth web, cross-shard walk) before this landed.
+# (gate:4000 via its NLB; account:8080 + grafana:3000 via ingress-nginx) are allowed from
+# broad sources / the ingress-nginx namespace precisely so the LoadBalancer + kubelet-probe paths
+# are never severed. NOTE: ingress traffic to account/grafana/the ACME solver is permitted from the
+# `ingress-nginx` namespace — where the controller runs on EKS — not kube-system (Traefik on k3s).
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -82,7 +83,7 @@ spec:
       ports:
         - { protocol: TCP, port: 9090 }
 ---
-# account: gRPC (:9100) from the gate; web (:8080) from Traefik (kube-system) for the OAuth site.
+# account: gRPC (:9100) from the gate; web (:8080) from ingress-nginx for the OAuth site.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -96,12 +97,12 @@ spec:
       ports:
         - { protocol: TCP, port: 9100 }
     - from:
-        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
       ports:
         - { protocol: TCP, port: 8080 }
 ---
-# gate telnet (:4000) is the PUBLIC game port, reached via the klipper svclb LoadBalancer (a
-# hostNetwork pod forwarding from the node IP). Allow from anywhere so the LB path is never severed —
+# gate telnet (:4000) is the PUBLIC game port, reached via its AWS NLB. Source IP is preserved by
+# externalTrafficPolicy: Local on the gate Service (gate.yaml), so allow from anywhere (0.0.0.0/0) —
 # the netpol's job is lateral movement, and the gate is meant to be publicly reachable.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -166,10 +167,10 @@ spec:
       ports:
         - { protocol: TCP, port: 9090 }
 ---
-# cert-manager HTTP-01 ACME solver: Traefik must reach the ephemeral solver pod (:8089) or Let's
-# Encrypt challenges fail — which under default-deny would silently break BOTH new certs (the #12
-# Grafana cert once DNS resolves) AND the ~60-day renewal of the existing account-web cert. The solver
-# pods are created dynamically in this namespace with this label.
+# cert-manager HTTP-01 ACME solver: ingress-nginx must reach the ephemeral solver pod (:8089) or
+# Let's Encrypt challenges fail — which under default-deny would silently break BOTH new certs (the
+# #12 Grafana cert once DNS resolves) AND the ~60-day renewal of the existing account-web cert. The
+# solver pods are created dynamically in this namespace with this label.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -180,11 +181,11 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
       ports:
         - { protocol: TCP, port: 8089 }
 ---
-# Grafana (:3000): only Traefik (kube-system) fronts it — the #12 public ingress path.
+# Grafana (:3000): only ingress-nginx fronts it — the #12 public ingress path.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -194,6 +195,6 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
       ports:
         - { protocol: TCP, port: 3000 }

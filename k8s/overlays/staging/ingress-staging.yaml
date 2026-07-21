@@ -1,16 +1,15 @@
-# Staging web ingress: serve the account OAuth website (account:8080) through k3s's bundled
-# Traefik with HTTPS. cert-manager issues a Let's Encrypt cert (HTTP-01, port 80) into
-# staging-web-tls; Traefik serves it on 443. The host is the stable domain, which points at the
-# node's RESERVED public IP — so this survives instance recreations.
+# Staging web ingress: serve the account OAuth website (account:8080) through ingress-nginx with
+# HTTPS. cert-manager issues a Let's Encrypt cert (HTTP-01, port 80) into staging-web-tls; nginx
+# serves it on 443. The host is the stable domain, CNAME'd at the ingress-nginx NLB hostname (see
+# RUNBOOK §DNS) — so this survives node replacements.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: account-web
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
-  ingressClassName: traefik
+  ingressClassName: nginx
   tls:
     - hosts:
         - staging.telos.double-nibble.com

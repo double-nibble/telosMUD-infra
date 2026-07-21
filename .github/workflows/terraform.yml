@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # for the GitHub OIDC -> AWS role assumption (keyless auth)
 
 jobs:
   terraform:
@@ -37,79 +38,25 @@ jobs:
       run:
         working-directory: terraform/envs/${{ matrix.env }}
     env:
-      # OCI provider auth (config-file-less). Populate these as repo secrets.
-      TF_VAR_region: ${{ secrets.OCI_REGION }}
-      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
-      TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
-      # The other required vars (no defaults) — identifiers, not secrets, but stored as secrets to keep
-      # the OCIDs out of the public repo. image_ocid is region-specific and ages out; bump it when the
-      # base image is deprecated (bootstrap-local.sh discovers the newest locally). ssh key PATHS are set
-      # in the SSH-key step below to the CI-created files.
-      TF_VAR_availability_domain: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
-      TF_VAR_image_ocid: ${{ secrets.OCI_IMAGE_OCID }}
-      OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
-      OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
-      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY }}
-      OCI_CLI_REGION: ${{ secrets.OCI_REGION }}
-      # S3-compatible backend (OCI Object Storage) auth via a Customer Secret Key.
-      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
-      # OCI's S3-compatible endpoint does not implement `aws-chunked` transfer encoding, which the AWS
-      # Go SDK (used by the s3 backend) enables by DEFAULT since early 2025 to add trailing checksums —
-      # causing state writes (PutObject) to fail with "501 NotImplemented: AWS chunked encoding not
-      # supported". Force the SDK to only checksum when the API requires it, which drops aws-chunked.
-      # (skip_s3_checksum in the backend block doesn't cover this newer SDK default.)
-      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
-      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+      # Region the cluster deploys into (must match the tfvars default). The S3 state backend region
+      # is pinned separately in backend.tf.
+      AWS_REGION: us-east-1
+      # NOTE: the assumed CI role is the Terraform APPLY principal, so it already gets cluster-admin via
+      # enable_cluster_creator_admin_permissions — deploy.yml can kubectl apply with it. Do NOT also pass
+      # it as admin_principal_arns: a second access entry for the same principal fails at apply
+      # (ResourceInUseException). admin_principal_arns is only for OTHER principals (a human operator role).
     steps:
       - uses: actions/checkout@v4
 
+      # Keyless AWS auth: assume the IAM role via GitHub's OIDC token. No long-lived access keys.
+      # The role's trust policy must allow this repo's OIDC subject; see RUNBOOK §CI.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - uses: hashicorp/setup-terraform@v3
-
-      # The OCI Terraform provider authenticates from ~/.oci/config (API-key/DEFAULT profile), the same
-      # as a local run — it does NOT read the OCI_CLI_* env vars (those are for the `oci` CLI). Write the
-      # config + key from the secrets so the provider block (region = var.region) resolves credentials.
-      - name: Write OCI provider config
-        run: |
-          mkdir -p ~/.oci
-          printf '%s\n' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          region=${{ secrets.OCI_REGION }}
-          key_file=$HOME/.oci/oci_api_key.pem
-          EOF
-          chmod 600 ~/.oci/config
-
-      # The instance-authorized-keys var + the kubeconfig-fetch provisioner both read key files by PATH.
-      # Write the private key from the secret, derive its public key, and point the path vars at them.
-      - name: Set up SSH key
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/telos && chmod 600 ~/.ssh/telos
-          ssh-keygen -y -f ~/.ssh/telos > ~/.ssh/telos.pub
-          echo "TF_VAR_ssh_private_key_path=$HOME/.ssh/telos" >> "$GITHUB_ENV"
-          echo "TF_VAR_ssh_public_key_path=$HOME/.ssh/telos.pub" >> "$GITHUB_ENV"
-
-      # The k3s module's `data.local_file.kubeconfig` reads ./kubeconfig, which the fetch_kubeconfig
-      # provisioner only writes when the instance is (re)created — so on a steady-state CI run the file is
-      # absent and plan fails. The real kubeconfig already lives in the KUBECONFIG_<env> secret (deploy.yml
-      # uses it), so seed the file from there to satisfy the data source. Absent secret (e.g. prod not yet
-      # bootstrapped) → no file → that env's plan will flag it, which is the correct signal.
-      - name: Seed kubeconfig for the local_file data source
-        env:
-          KC: ${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}
-        run: |
-          if [ -n "${KC}" ]; then
-            printf '%s' "${KC}" | base64 -d > kubeconfig
-            chmod 600 kubeconfig
-          else
-            echo "::warning::No KUBECONFIG_${{ matrix.env }} secret; ./kubeconfig not seeded — plan may fail on data.local_file.kubeconfig for this env."
-          fi
 
       - name: Terraform init
         run: terraform init -input=false

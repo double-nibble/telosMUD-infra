@@ -2,10 +2,22 @@ apiVersion: v1
 kind: Service
 metadata:
   name: gate
-  # type: LoadBalancer -> k3s Klipper servicelb binds :4000 on the node's public IP. This is
-  # the FREE L4 load balancer that makes the raw-TCP telnet front door work without a cloud LB.
+  # type: LoadBalancer + the NLB annotations -> AWS provisions an internet-facing Network Load
+  # Balancer (L4) for this Service. An NLB is what makes the raw-TCP telnet front door work: it
+  # forwards TCP untouched (no HTTP/TLS termination), unlike an ALB. This is a SEPARATE NLB from
+  # ingress-nginx's (web :443) — the gate speaks telnet, not HTTP. The in-tree AWS cloud provider
+  # handles this; no AWS Load Balancer Controller is required.
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "instance"
 spec:
   type: LoadBalancer
+  # Preserve the real client IP to the gate. With target-type instance the DEFAULT (Cluster) policy
+  # SNATs every telnet connection to a node IP — defeating per-IP rate limiting, connection caps, and
+  # IP bans on this public raw-TCP port, and corrupting abuse/audit logs. Local keeps the source IP
+  # (and gives the NLB real per-node health-check semantics). Single node, so no cross-node imbalance.
+  externalTrafficPolicy: Local
   selector:
     app: gate
   ports:

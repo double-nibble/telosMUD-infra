@@ -13,9 +13,9 @@ web sign-in.
 - **The content:** [`double-nibble/telosMUD-content`](https://github.com/double-nibble/telosMUD-content)
   — an *example* content pack. You can run it as-is, fork it, or author your own.
 
-> There is a concrete reference implementation of everything below (Oracle Cloud + k3s +
-> Terraform) in this repository's [`terraform/`](terraform/) and [`k8s/`](k8s/) directories, and
-> in [RUNBOOK.md](RUNBOOK.md). This guide is the vendor-neutral version.
+> There is a concrete reference implementation of everything below (AWS EKS + Terraform) in this
+> repository's [`terraform/`](terraform/) and [`k8s/`](k8s/) directories, and in
+> [RUNBOOK.md](RUNBOOK.md). This guide is the vendor-neutral version.
 
 ---
 
@@ -68,9 +68,9 @@ You need a hostname you control (e.g. `mud.example.com`). It's required for:
 - HTTPS on the sign-in website, and
 - the GitHub OAuth callback (which must be a stable, real URL).
 
-You'll point a DNS **A-record** at your gate/ingress address. A stable/reserved IP is strongly
-recommended so the record never has to change (see [RUNBOOK.md](RUNBOOK.md) for how the
-reference implementation reserves one).
+You'll point DNS at your gate/ingress address. With a fixed IP that's an **A-record**; with a cloud
+load balancer that hands out a hostname (as EKS does) it's a **CNAME** to the LB hostname (see
+[RUNBOOK.md](RUNBOOK.md) for how the AWS reference implementation wires this).
 
 ### 2.3 A login provider (GitHub OAuth)
 Players sign in through your website with GitHub OAuth, then get a one-time link code they
@@ -337,5 +337,5 @@ sign in with GitHub, and you'll drop into the game. Grant yourself staff by sett
 
 ---
 
-For a fully worked concrete example (Oracle Cloud Always-Free, k3s, Terraform, reserved IP,
+For a fully worked concrete example (AWS EKS, Terraform, NLB for telnet, ingress-nginx + cert-manager
 Let's Encrypt), see [PLAN.md](PLAN.md) and [RUNBOOK.md](RUNBOOK.md) in this repository.

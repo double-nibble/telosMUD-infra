@@ -2,34 +2,53 @@ terraform {
   required_version = ">= 1.6"
 
   required_providers {
-    oci = {
-      source  = "oracle/oci"
+    aws = {
+      source  = "hashicorp/aws"
       version = ">= 5.0"
     }
-    null = {
-      source  = "hashicorp/null"
-      version = ">= 3.2"
+    helm = {
+      source  = "hashicorp/helm"
+      version = ">= 2.13, < 3.0"
     }
-    local = {
-      source  = "hashicorp/local"
-      version = ">= 2.4"
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.30"
     }
   }
 
-  # State in an OCI Object Storage bucket (S3-compatible). Same bucket as staging, different key.
+  # State in an S3 bucket with a DynamoDB lock table (same bucket as staging, different key). Create
+  # both ONCE, out of band, before the first `terraform init` (see RUNBOOK §0).
   backend "s3" {
-    bucket                      = "telosmud-tfstate"             # TODO: your bucket name
-    key                         = "production/terraform.tfstate"
-    region                      = "us-ashburn-1"
-    endpoints                   = { s3 = "https://idknnsi3cdrb.compat.objectstorage.us-ashburn-1.oraclecloud.com" }
-    skip_region_validation      = true
-    skip_credentials_validation = true
-    skip_requesting_account_id  = true
-    skip_s3_checksum            = true
-    use_path_style              = true
+    bucket         = "telosmud-tfstate"
+    key            = "production/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "telosmud-tflock"
+    encrypt        = true
   }
 }
 
-provider "oci" {
+provider "aws" {
   region = var.region
+}
+
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+    }
+  }
 }

@@ -1,17 +1,17 @@
-# Web/OAuth ingress via k3s's bundled Traefik, TLS from cert-manager (Let's Encrypt).
-# The gate's telnet TLS uses the same issuer via the separate Certificate below.
+# Web/OAuth ingress via ingress-nginx (installed by Terraform), TLS from cert-manager (Let's
+# Encrypt). The gate's telnet TLS uses the same issuer via the separate Certificate below.
 #
-# PREREQUISITE (cluster add-on, not managed by Kustomize): install cert-manager and create a
-# `letsencrypt` ClusterIssuer using DNS-01 (Cloudflare token in a Secret). See RUNBOOK step 2.
+# PREREQUISITE: ingress-nginx + cert-manager are installed by terraform/modules/cluster-bootstrap;
+# the `letsencrypt` ClusterIssuer is applied as a cluster add-on (k8s/addons/letsencrypt-issuer.yaml).
+# See RUNBOOK step 2.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: account-web
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
-  ingressClassName: traefik
+  ingressClassName: nginx
   tls:
     - hosts:
         - telos.double-nibble.com
@@ -28,8 +28,17 @@ spec:
                 port:
                   number: 8080
 ---
-# Telnet TLS cert for the gate. cert-manager writes the keypair into the `gate-tls` Secret,
-# which patch-production.yaml mounts into the gate at /tls.
+# Telnet TLS cert for the gate. cert-manager writes the keypair into the `gate-tls` Secret, which
+# patch-production.yaml mounts into the gate at /tls.
+#
+# IMPORTANT (two-NLB architecture): the gate is a SEPARATE NLB from ingress-nginx, on its own
+# hostname. The web host (telos.double-nibble.com, above) CNAMEs the ingress NLB; the gate host
+# (gate.telos.double-nibble.com) CNAMEs the GATE NLB. That means this cert canNOT use the HTTP-01
+# `letsencrypt` issuer — HTTP-01 validates a name by serving a challenge through ingress-nginx, but
+# gate.telos.* points at the gate NLB, which has no HTTP listener. So the gate cert is issued via
+# DNS-01 (`letsencrypt-dns01`, k8s/addons/letsencrypt-dns01.yaml), which validates via a DNS TXT
+# record and doesn't care where the name resolves. Players telnet-TLS to gate.telos.double-nibble.com:4000
+# and the presented cert's SAN matches.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -37,7 +46,7 @@ metadata:
 spec:
   secretName: gate-tls
   dnsNames:
-    - telos.double-nibble.com # players `telnet`/TLS to this host:4000
+    - gate.telos.double-nibble.com # players `telnet`/TLS to this host:4000 (CNAME -> gate NLB)
   issuerRef:
-    name: letsencrypt
+    name: letsencrypt-dns01
     kind: ClusterIssuer
