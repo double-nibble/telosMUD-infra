@@ -1,0 +1,110 @@
+# Grafana (#8) — ClusterIP only here; the public hostname + Traefik auth middleware are #12. But it is
+# HARDENED from the start (admin password from a Secret, anonymous + sign-up + unsigned-plugins all off)
+# so there is never a default-credential window, not even on the in-cluster network (which is flat until
+# the NetworkPolicy in #10). Datasources are provisioned to Prometheus + Loki (Tempo is deferred to
+# Observability 3, when traces actually flow — an empty Tempo datasource reads as "tracing is broken").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  labels: { app: grafana }
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki:3100
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  labels: { app: grafana }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi # SQLite + dashboards; small
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels: { app: grafana }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: grafana }
+  template:
+    metadata:
+      labels: { app: grafana }
+    spec:
+      securityContext:
+        fsGroup: 472 # grafana runs as uid 472; own the SQLite volume
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.1.1 # pinned patched release (post the 2025 CVE chain); upgrade cadence noted in RUNBOOK (#12)
+          env:
+            # Admin password from a Secret — NEVER the admin/admin default. The Secret is created
+            # out-of-band on the cluster (see RUNBOOK) since staging's SOPS path is off; a missing
+            # Secret makes the pod fail to start, which is the safe failure (no default-cred Grafana).
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: admin-password
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS
+              value: "false"
+            - name: GF_INSTALL_PLUGINS # install nothing (the CVE-2025-4123 chain ran through the plugin proxy)
+              value: ""
+            - name: GF_PATHS_DATA
+              value: /data
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+          ports:
+            - { name: http, containerPort: 3000 }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: datasources
+          configMap: { name: grafana-datasources }
+        - name: data
+          persistentVolumeClaim: { claimName: grafana-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels: { app: grafana }
+spec:
+  type: ClusterIP
+  selector: { app: grafana }
+  ports:
+    - { name: http, port: 3000, targetPort: http }

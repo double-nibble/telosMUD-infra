@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The LGTM backends (#8). Discrete components — NOT the grafana/otel-lgtm all-in-one used in compose
+# (that image is dev/demo-scoped by Grafana Labs). Tempo is deferred to Observability 3, when traces
+# actually flow (an empty Tempo datasource reads as "tracing is broken"). The OTel Collector that feeds
+# these is #9; Grafana's public exposure + Traefik auth is #12.
+resources:
+  - loki.yaml
+  - prometheus.yaml
+  - grafana.yaml

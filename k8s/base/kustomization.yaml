@@ -14,6 +14,9 @@ resources:
   - world.yaml
   - gate.yaml
   - account.yaml
+  # Observability 2 (#8): the LGTM backends (Loki + Prometheus + Grafana). The collector that feeds them
+  # is #9; Grafana's public ingress + Traefik auth is #12.
+  - observability
 
 # The `telos-secrets` Secret is NOT listed here — it is SOPS-encrypted in each overlay and
 # applied separately (`sops -d overlays/<env>/secrets.enc.yaml | kubectl apply -f -`).
