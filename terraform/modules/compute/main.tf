@@ -13,9 +13,27 @@ locals {
     [for port in var.open_tcp_ports : "iptables -I INPUT -p tcp --dport ${port} -j ACCEPT"],
     [
       "netfilter-persistent save",
-      "until curl -sfL https://get.k3s.io -o /tmp/install-k3s.sh; do echo 'waiting for egress (reserved IP attach)'; sleep 3; done",
-      "INSTALL_K3S_EXEC=\"server --tls-san ${var.node_fqdn} --write-kubeconfig-mode 644\" sh /tmp/install-k3s.sh",
-      "until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do sleep 3; done",
+      # The reserved public IP (egress) attaches a few seconds AFTER launch, so early-boot DNS
+      # fails ("Temporary failure resolving ..."). Gate on DNS actually resolving every host the
+      # install touches — get.k3s.io for the script AND update.k3s.io/github.com for the binary.
+      # Without github.com here, the script download can succeed in a resolve window that closes
+      # again before the installer fetches the binary, leaving k3s uninstalled.
+      #
+      # Every wait is DEADLINE-BOUNDED so a NON-transient failure (bad config, OOM, a permanently
+      # 404'd version) fails the runcmd LOUDLY (cloud-init -> status:error -> the Terraform
+      # provisioner's `test -f k3s.yaml` fails fast) instead of spinning forever and reproducing
+      # the exact indefinite cloud-init/Terraform hang this change exists to kill. `deadline` is
+      # set and consumed within ONE runcmd string because cloud-init runs each entry as its own
+      # `sh -c`, so a var does not survive to the next entry.
+      "deadline=$(($(date +%s)+300)); until getent hosts get.k3s.io update.k3s.io github.com >/dev/null 2>&1; do [ $(date +%s) -ge $deadline ] && { echo 'DNS/egress not up within 300s' >&2; exit 1; }; echo 'waiting for DNS/egress (reserved IP attach)'; sleep 3; done",
+      "deadline=$(($(date +%s)+300)); until curl -sfL https://get.k3s.io -o /tmp/install-k3s.sh; do [ $(date +%s) -ge $deadline ] && { echo 'egress not up within 300s' >&2; exit 1; }; echo 'waiting for egress'; sleep 3; done",
+      # Retry the WHOLE install until the service is actually active: the installer downloads the
+      # k3s binary from github/update.k3s.io, and a transient egress blip there fails the install
+      # WITHOUT failing this runcmd — leaving the node k3s-less and the final wait below looping
+      # forever. Looping on `systemctl is-active` makes a transient failure self-healing; the
+      # deadline makes a persistent one fail loudly.
+      "deadline=$(($(date +%s)+900)); until INSTALL_K3S_EXEC=\"server --tls-san ${var.node_fqdn} --write-kubeconfig-mode 644\" sh /tmp/install-k3s.sh && systemctl is-active --quiet k3s; do [ $(date +%s) -ge $deadline ] && { echo 'k3s did not converge within 900s' >&2; exit 1; }; echo 'k3s install incomplete (transient egress?) — retrying'; sleep 5; done",
+      "deadline=$(($(date +%s)+300)); until kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null 2>&1; do [ $(date +%s) -ge $deadline ] && { echo 'node not Ready within 300s' >&2; exit 1; }; sleep 3; done",
     ],
   )
 
