@@ -55,6 +55,13 @@ jobs:
       # S3-compatible backend (OCI Object Storage) auth via a Customer Secret Key.
       AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
+      # OCI's S3-compatible endpoint does not implement `aws-chunked` transfer encoding, which the AWS
+      # Go SDK (used by the s3 backend) enables by DEFAULT since early 2025 to add trailing checksums —
+      # causing state writes (PutObject) to fail with "501 NotImplemented: AWS chunked encoding not
+      # supported". Force the SDK to only checksum when the API requires it, which drops aws-chunked.
+      # (skip_s3_checksum in the backend block doesn't cover this newer SDK default.)
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
     steps:
       - uses: actions/checkout@v4
 
