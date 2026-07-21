@@ -78,6 +78,7 @@ spec:
     metadata:
       labels: { app: loki }
     spec:
+      automountServiceAccountToken: false # Loki never calls the k8s API (security review F3)
       securityContext:
         # otel-lgtm/loki images run as uid 10001; own the mounted volume so the filesystem store is writable.
         fsGroup: 10001

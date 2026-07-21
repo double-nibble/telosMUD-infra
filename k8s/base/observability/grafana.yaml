@@ -50,6 +50,9 @@ spec:
     metadata:
       labels: { app: grafana }
     spec:
+      # Grafana never calls the k8s API; don't mount a SA token (it has a 2025 history of pre-auth RCE,
+      # so a mounted token would be a needless pivot — security review F3).
+      automountServiceAccountToken: false
       securityContext:
         fsGroup: 472 # grafana runs as uid 472; own the SQLite volume
       containers:

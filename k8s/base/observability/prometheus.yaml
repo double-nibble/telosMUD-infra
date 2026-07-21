@@ -70,6 +70,9 @@ spec:
     metadata:
       labels: { app: prometheus }
     spec:
+      # Prometheus never calls the Kubernetes API, so don't mount a namespace SA token it could leak if
+      # compromised (defense-in-depth, security review F3).
+      automountServiceAccountToken: false
       securityContext:
         fsGroup: 65534 # prometheus runs as nobody(65534); own the TSDB volume
       containers:
@@ -80,7 +83,9 @@ spec:
             - --storage.tsdb.path=/data
             - --storage.tsdb.retention.time=7d
             - --storage.tsdb.retention.size=2GB # size cap saves the node during a cardinality blowup
-            - --web.enable-lifecycle
+            # NOTE: --web.enable-lifecycle deliberately OMITTED — nothing reloads Prometheus at runtime,
+            # and on the (interim) flat network it would expose an unauthenticated POST /-/quit remote
+            # kill. Reload the config by restarting the pod instead (security review F2).
           ports:
             - { name: http, containerPort: 9090 }
           readinessProbe:
