@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          image: postgres:16.14-alpine # pinned: pg-backup's pg_dump must equal this minor (pg-backup.yaml)
           ports:
             - containerPort: 5432
           env:

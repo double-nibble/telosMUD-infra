@@ -331,44 +331,82 @@ the cadence as load-bearing, not aspirational.
 ## Backups
 
 The `pg-backup` CronJob (`k8s/base/pg-backup.yaml`) runs nightly at 03:17 UTC: an initContainer
-`pg_dump`s the DB (via `TELOS_POSTGRES_DSN` from `telos-secrets`) into a gzip, then an `aws-cli`
-container uploads it to OCI Object Storage (S3-compatible). This is the ONLY thing between a wiped
+`pg_dump -Fc`s the DB (via `TELOS_POSTGRES_DSN` from `telos-secrets`) into an in-memory scratch
+volume, asserts it actually contains table data, then an `aws-cli` container uploads it to OCI
+Object Storage (S3-compatible) and shreds the local copy. This is the ONLY thing between a wiped
 boot volume and total data loss on this single-node/local-PVC topology.
 
-**Two operator steps activate it** (the CronJob deploys with the app, but its jobs fail with
-`CreateContainerConfigError: secret "backup-s3" not found` until you do this — deliberate, so it
-never silently backs up to nowhere):
+**RPO:** a restore recovers to the *last app→Postgres flush*, not the last player action — the
+durability ladder lets authoritative shard memory lead Postgres by up to the checkpoint interval
+(~60s), plus explicit flushes on logout/drain. Nightly cadence means up to ~24h of loss in the
+worst case; run an on-demand backup (below) before risky operations.
+
+**Buckets & credentials (least-privilege — do NOT reuse the tfstate key):**
 
 ```sh
-# 1. Create the backup bucket ONCE per tenancy (out-of-band, like the tfstate bucket):
-oci os bucket create -ns <namespace> --compartment-id <compartment-ocid> --name telosmud-backups
+# 1. Create the backup bucket(s) ONCE, out-of-band (like the tfstate bucket). PREFER one bucket per
+#    env so a staging-cluster credential leak can't read/tamper PRODUCTION dumps (a shared bucket +
+#    BACKUP_PREFIX is only a naming convention, not an authz boundary):
+oci os bucket create -ns <namespace> --compartment-id <compartment-ocid> --name telosmud-backups-production
+oci os bucket get -ns <namespace> --name telosmud-backups-production --query 'data."public-access-type"'
+#    ^ MUST print "NoPublicAccess" (the default) — these dumps are a full accounts/PII export.
 
-# 2. Create the `backup-s3` Secret in each cluster. Reuse (or make) an OCI Customer Secret Key —
-#    the same S3-compat credential kind the Terraform state backend uses (Console: Identity ->
-#    your user -> Customer Secret Keys). BACKUP_PREFIX separates envs in the shared bucket.
+# 2. Create a DEDICATED, bucket-scoped IAM user for backup writes — NEVER the Terraform-state
+#    Customer Secret Key (that key inherits its user's FULL permissions; a leak of this in-cluster
+#    Secret would then expose tfstate = every Terraform-managed secret in plaintext). Console:
+#    create user `telosmud-backup-writer` in a group `backup-writers`, add the policy, then generate
+#    a Customer Secret Key for that user:
+#      allow group backup-writers to manage objects in compartment <name> where target.bucket.name='telosmud-backups-production'
+#      allow group backup-writers to read  buckets in compartment <name> where target.bucket.name='telosmud-backups-production'
+#    (Give each env's cluster only its own bucket's key.)
+
+# 3. Create the `backup-s3` Secret in each cluster (jobs fail with "secret backup-s3 not found" until
+#    this exists — deliberate, so it never silently backs up to nowhere):
 kubectl -n telosmud create secret generic backup-s3 \
-  --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
-  --from-literal=BACKUP_BUCKET=telosmud-backups \
+  --from-literal=AWS_ACCESS_KEY_ID=<backup-writer-access-key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<backup-writer-secret-key> \
+  --from-literal=BACKUP_BUCKET=telosmud-backups-production \
   --from-literal=BACKUP_S3_ENDPOINT=https://<namespace>.compat.objectstorage.<region>.oraclecloud.com \
-  --from-literal=BACKUP_PREFIX=production   # or `staging`
+  --from-literal=BACKUP_PREFIX=production   # or `staging`, into that env's own bucket
 ```
 
 **Verify / run on demand:**
 
 ```sh
 kubectl -n telosmud create job pg-backup-now --from=cronjob/pg-backup
-kubectl -n telosmud logs -f job/pg-backup-now -c dump     # "dumping database..." + a byte count
-kubectl -n telosmud logs -f job/pg-backup-now -c upload   # "backup complete: s3://telosmud-backups/..."
-oci os object list -ns <namespace> --bucket-name telosmud-backups --prefix production
+kubectl -n telosmud logs -f job/pg-backup-now -c dump     # "dump contains N tables of data (… bytes)"
+kubectl -n telosmud logs -f job/pg-backup-now -c upload   # "backup complete: s3://…/production/…dump"
+oci os object list -ns <namespace> --bucket-name telosmud-backups-production --prefix production
 ```
 
-**Restore** a dump into the running DB:
+**Restore.** The dump is custom-format, so restore with `pg_restore` (NOT `psql`). `pg_restore` must
+read a real file (it seeks the archive TOC — you can't stream it over stdin), so stage it into the
+pod. `--clean --if-exists` drops+recreates each object, so this works onto the already-migrated DB
+without a `DROP DATABASE` dance; `--exit-on-error` fails fast instead of a silent partial restore.
+**Stop writers first** so the DB is idle:
 
 ```sh
-oci os object get -ns <namespace> --bucket-name telosmud-backups \
-  --name production/telosmud-<ts>.sql.gz --file - | gunzip \
-  | kubectl -n telosmud exec -i postgres-0 -c postgres -- psql "$TELOS_POSTGRES_DSN"
+kubectl -n telosmud scale deploy/world deploy/account deploy/gate --replicas=0
+
+oci os object get -ns <namespace> --bucket-name telosmud-backups-production \
+  --name production/telosmud-<ts>.dump --file /tmp/restore.dump
+kubectl -n telosmud cp /tmp/restore.dump postgres-0:/tmp/restore.dump -c postgres
+
+# FULL restore (schema + goose bookkeeping + content + player state all come from the dump —
+# do NOT re-run db-init afterwards, it would double up):
+kubectl -n telosmud exec -i postgres-0 -c postgres -- \
+  pg_restore --clean --if-exists --no-owner --exit-on-error -U telos -d telosmud /tmp/restore.dump
+
+# — OR — SELECTIVE restore of just the durable PLAYER STATE, letting db-init re-derive the
+# reproducible content/definition tables from the external content store (the DR path you usually
+# want after content already redeployed):
+kubectl -n telosmud exec -i postgres-0 -c postgres -- \
+  pg_restore --data-only --no-owner --exit-on-error -U telos -d telosmud \
+    -t accounts -t account_identities -t account_role_audit -t characters -t mail -t object_instances \
+    /tmp/restore.dump
+
+kubectl -n telosmud exec postgres-0 -c postgres -- rm -f /tmp/restore.dump
+kubectl -n telosmud scale deploy/world deploy/account deploy/gate --replicas=<N>   # bring the app back
 ```
 
 **Retention (optional, requires one IAM grant).** A 14-day object-expiry lifecycle rule keeps the
@@ -377,16 +415,16 @@ until you grant the Object Storage service principal access to the bucket:
 
 ```
 # IAM policy statement (Console -> Policies), then apply the lifecycle rule:
-allow service objectstorage-<region> to manage object-family in compartment <name> where target.bucket.name='telosmud-backups'
-oci os object-lifecycle-policy put -ns <namespace> --bucket-name telosmud-backups --from-json '{"items":[{"name":"expire-old-backups","action":"DELETE","timeAmount":14,"timeUnit":"DAYS","isEnabled":true,"target":"objects"}]}'
+allow service objectstorage-<region> to manage object-family in compartment <name> where target.bucket.name='telosmud-backups-production'
+oci os object-lifecycle-policy put -ns <namespace> --bucket-name telosmud-backups-production --from-json '{"items":[{"name":"expire-old-backups","action":"DELETE","timeAmount":14,"timeUnit":"DAYS","isEnabled":true,"target":"objects"}]}'
 ```
 
 > Notes. The dump waits (`pg_isready` poll) for postgres to be reachable before dumping — on k3s the
 > bundled kube-router netpol programs the `allow-postgres` rule for a new pod's IP a beat after start,
-> so an immediate connect is REJECTed. Single-node PVC snapshots are a PII export (see the
-> observability storage-at-rest note); the dumps in object storage are equally sensitive — scope the
-> bucket's access tightly. A managed/off-node Postgres would remove the single-node-loss exposure
-> entirely (bigger design question — tracked in issue #25).
+> so an immediate connect is REJECTed. The dump is memory-backed and shredded post-upload so a full-PII
+> export never persists on the node boot disk (which the observability collector mounts read-only). A
+> managed/off-node Postgres would remove the single-node-loss exposure entirely (bigger design
+> question — tracked in issue #25).
 
 ## Teardown
 
