@@ -29,7 +29,6 @@ spec:
   ingress:
     - from:
         - podSelector: { matchLabels: { app: world } }
-        - podSelector: { matchLabels: { app: gate } }
         - podSelector: { matchLabels: { app: account } }
         - podSelector: { matchLabels: { app: db-init } }
       ports:
@@ -61,7 +60,10 @@ spec:
     - from:
         - podSelector: { matchLabels: { app: world } }
         - podSelector: { matchLabels: { app: gate } }
-        - podSelector: { matchLabels: { app: account } }
+        # db-init (telos-pull) broadcasts a best-effort post-import hot-reload over NATS; without this,
+        # a content roll against a RUNNING cluster silently serves stale content until a manual restart
+        # (the fresh-apply path doesn't hit it — #10 review). account does NOT dial NATS.
+        - podSelector: { matchLabels: { app: db-init } }
       ports:
         - { protocol: TCP, port: 4222 }
 ---
