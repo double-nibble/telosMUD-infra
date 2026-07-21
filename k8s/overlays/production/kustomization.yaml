@@ -10,19 +10,24 @@ resources:
 images:
   - name: ghcr.io/OWNER/telos-world
     newName: ghcr.io/double-nibble/telos-world
-    newTag: latest
+    newTag: sha-8ae3770
   - name: ghcr.io/OWNER/telos-gate
     newName: ghcr.io/double-nibble/telos-gate
-    newTag: latest
+    newTag: sha-8ae3770
   - name: ghcr.io/OWNER/telos-account
     newName: ghcr.io/double-nibble/telos-account
-    newTag: latest
+    newTag: sha-8ae3770
   - name: ghcr.io/OWNER/telos-migrate
     newName: ghcr.io/double-nibble/telos-migrate
-    newTag: latest
+    newTag: sha-8ae3770
   - name: ghcr.io/OWNER/telos-seed
     newName: ghcr.io/double-nibble/telos-seed
-    newTag: latest
+    newTag: sha-8ae3770
+  # db-init runs telos-pull (external content store) instead of telos-seed. Pinned to the same
+  # immutable commit SHA as the rest of the fleet so a redeploy rolls the content-import tool in lockstep.
+  - name: ghcr.io/OWNER/telos-pull
+    newName: ghcr.io/double-nibble/telos-pull
+    newTag: sha-8ae3770
 
 patches:
   - path: patch-production.yaml
