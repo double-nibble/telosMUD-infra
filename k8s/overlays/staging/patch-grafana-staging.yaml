@@ -1,0 +1,19 @@
+# Grafana settings that depend on the public staging hostname (#12). Kept in the overlay (not base)
+# because the root URL is environment-specific. Secure + SameSite cookies matter now that Grafana is
+# reachable over the internet behind the auth middleware.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+spec:
+  template:
+    spec:
+      containers:
+        - name: grafana
+          env:
+            - name: GF_SERVER_ROOT_URL
+              value: https://grafana.staging.telos.double-nibble.com
+            - name: GF_SECURITY_COOKIE_SECURE
+              value: "true"
+            - name: GF_SECURITY_COOKIE_SAMESITE
+              value: strict
