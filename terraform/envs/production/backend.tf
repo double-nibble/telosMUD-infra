@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.11" # native S3 state locking (use_lockfile) below
 
   required_providers {
     aws = {
@@ -16,14 +16,14 @@ terraform {
     }
   }
 
-  # State in an S3 bucket with a DynamoDB lock table (same bucket as staging, different key). Create
-  # both ONCE, out of band, before the first `terraform init` (see RUNBOOK §0).
+  # State in an S3 bucket with native S3 locking (use_lockfile — no DynamoDB table needed). Same bucket
+  # as staging, different key. Create the bucket ONCE, out of band, before the first `terraform init`.
   backend "s3" {
-    bucket         = "telosmud-tfstate"
-    key            = "production/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "telosmud-tflock"
-    encrypt        = true
+    bucket       = "telosmud-tfstate"
+    key          = "production/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+    encrypt      = true
   }
 }
 

@@ -8,8 +8,8 @@ deployment chosen for operational simplicity. (This replaced an earlier Oracle A
 design; see git history.)
 
 - **Terraform** (`terraform/`) provisions the VPC, EKS cluster + node group, cluster add-ons
-  (EBS CSI, ingress-nginx, cert-manager), and an S3 backup bucket. State lives in an S3 bucket with a
-  DynamoDB lock table.
+  (EBS CSI, ingress-nginx, cert-manager), and an S3 backup bucket. State lives in an S3 bucket with
+  native S3 locking.
 - **Kustomize** (`k8s/`) deploys the app: a `base/` plus per-environment overlays that flip the
   dev/prod hardening deltas.
 - **GitHub Actions** (`.github/workflows/`) run `terraform apply` and `kubectl apply`, authenticating

@@ -23,7 +23,10 @@ default node size / VPC CIDR. Edit that file to change the node instance type (e
 
 ### Terraform remote state (create ONCE, before the first `terraform init`)
 
-The S3 backend + DynamoDB lock table named in `terraform/envs/*/backend.tf` must exist first:
+The S3 state bucket named in `terraform/envs/*/backend.tf` must exist first. Locking is native S3
+(`use_lockfile`, Terraform ≥1.11) — **no DynamoDB table needed**. The bucket name is **globally
+unique across all of AWS**; if `telosmud-tfstate` is taken, pick another and update `bucket` in both
+`terraform/envs/{staging,production}/backend.tf`.
 
 ```sh
 aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
@@ -32,14 +35,10 @@ aws s3api put-bucket-versioning --bucket telosmud-tfstate \
 # State holds the cluster CA + any secrets in state — lock the bucket down:
 aws s3api put-public-access-block --bucket telosmud-tfstate \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws dynamodb create-table --table-name telosmud-tflock \
-  --attribute-definitions AttributeName=LockID,AttributeType=S \
-  --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST --region us-east-1
 ```
 
-> Terraform ≥1.11 deprecates `dynamodb_table` in favor of native S3 state locking (`use_lockfile`).
-> The DynamoDB table above still works (a deprecation warning, not an error); migrate later if you like.
+The IAM role your CI/laptop uses needs `s3:ListBucket` on the bucket and `s3:GetObject`/`s3:PutObject`/
+`s3:DeleteObject` on `telosmud-tfstate/*` (the state read/write + lockfile).
 
 ### CI auth (GitHub OIDC → IAM role)
 

@@ -105,8 +105,9 @@ off by default. The `backup-s3` and `grafana-*` Secrets are always out-of-band (
 
 ## Terraform state
 
-An **S3 bucket** (`telosmud-tfstate`, one key per env) with a **DynamoDB lock table**
-(`telosmud-tflock`). Created once, out of band, before the first `terraform init` (RUNBOOK §0).
+An **S3 bucket** (`telosmud-tfstate`, one key per env) with **native S3 state locking**
+(`use_lockfile`, Terraform ≥1.11 — no DynamoDB table). Created once, out of band, before the first
+`terraform init` (RUNBOOK §0).
 
 ## Domain & TLS
 

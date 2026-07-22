@@ -58,7 +58,7 @@ write_tfvars production
 cat <<EOF
 
 Done. Next (see RUNBOOK.md for the full path):
-  0. (once) create the S3 state bucket + DynamoDB lock table named in backend.tf
+  0. (once) create the S3 state bucket named in backend.tf (native S3 locking; no DynamoDB table)
   1. cd terraform/envs/staging && terraform init && terraform apply
   2. aws eks update-kubeconfig --name telos-staging --region $REGION
   3. apply k8s/addons + secrets, then: kustomize build k8s/overlays/staging | kubectl apply -f -
