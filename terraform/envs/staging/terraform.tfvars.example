@@ -1,7 +1,7 @@
 # AWS EKS — staging. All values have sane defaults; override only what you need.
 # Auth comes from your AWS CLI environment (`aws configure` / env vars / SSO), not from here.
 region             = "us-east-1"
-cluster_version    = "1.30"
+cluster_version    = "1.33"
 vpc_cidr           = "10.10.0.0/16"
 node_instance_type = "t4g.large" # t4g.xlarge (16 GB) if the LGTM stack OOMs
 node_ami_type      = "AL2023_ARM_64_STANDARD"
