@@ -1,0 +1,53 @@
+name: up
+
+# One click builds the ENTIRE environment: terraform apply (VPC + EKS + node group + addons +
+# external-dns + cert-manager + S3) then the app deploy (secrets + issuers + kustomize + rollout).
+# DNS records and TLS certs come up on their own (external-dns writes Route53 from the NLB hostnames;
+# cert-manager issues Let's Encrypt). No manual kubectl/aws/DNS steps.
+#
+# Prereqs (one-time, survive `down`): the OIDC role (AWS_ROLE_ARN), the S3 state bucket, the GH
+# secrets deploy.yml lists, and the Route53 zone. See RUNBOOK §0.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to build"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }} # production pauses on the required-reviewer gate
+    defaults:
+      run:
+        working-directory: terraform/envs/${{ inputs.env }}
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform apply
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
+
+  app:
+    needs: infra
+    uses: ./.github/workflows/deploy.yml
+    with:
+      env: ${{ inputs.env }}
+    secrets: inherit

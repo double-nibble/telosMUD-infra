@@ -89,19 +89,21 @@ throwaway test deployment — not a $0 design.
 
 ## Secrets
 
-**SOPS + age** for the CI-applied path (encrypted `*.enc.yaml`, decrypted with a `SOPS_AGE_KEY`
-Actions secret). Staging was bootstrapped by applying `telos-secrets` manually, so the SOPS path is
-off by default. The `backup-s3` and `grafana-*` Secrets are always out-of-band (RUNBOOK).
+The cluster Secrets (`telos-secrets`, `grafana-admin`) are created by the deploy workflow from GitHub
+Actions secrets — no manual `kubectl`. DNS + cert secrets don't exist at all: external-dns and
+cert-manager reach Route53 via **IRSA** roles, and cert-manager mints the TLS certs.
 
-## CI/CD
+## CI/CD (one-click lifecycle)
 
 - **`gomud` (app repo)** — publishes multi-arch (`amd64` + `arm64`) images to GHCR. No change here.
 - **`telosMUD-infra` (this repo)**:
-  - `terraform.yml` — `plan` on PR, `apply` staging on push to main, production via `workflow_dispatch`;
-    keyless AWS auth via GitHub OIDC. GitHub Environments gate production.
-  - `deploy.yml` — OIDC → `aws eks update-kubeconfig` → optional SOPS decrypt → `kustomize build |
-    kubectl apply`.
-  - `validate.yml` — renders every overlay + `kubeconform` (no cluster).
+  - **`up.yml`** — `workflow_dispatch`: `terraform apply` → calls `deploy.yml`. Builds a whole env.
+  - **`down.yml`** — `workflow_dispatch` (type `DESTROY`): drains the k8s NLBs + EBS, then
+    `terraform destroy`.
+  - `deploy.yml` — OIDC → `update-kubeconfig` → create Secrets from GH secrets → apply ClusterIssuers →
+    `kustomize build | kubectl apply` → wait. Reusable (`workflow_call`) + push/dispatch.
+  - `terraform.yml` — `plan` on PR, `apply` staging on push, production via dispatch. `validate.yml` —
+    renders every overlay + `kubeconform`. All keyless via GitHub OIDC; Environments gate production.
 
 ## Terraform state
 
@@ -109,19 +111,23 @@ An **S3 bucket** (`telosmud-tfstate`, one key per env) with **native S3 state lo
 (`use_lockfile`, Terraform ≥1.11 — no DynamoDB table). Created once, out of band, before the first
 `terraform init` (RUNBOOK §0).
 
-## Domain & TLS
+## Domain & TLS (fully automated, per-env isolated)
 
-A registered domain is the only truly unavoidable cost besides AWS. EKS load balancers hand out **DNS
-names, not static IPs**, so hosts are **CNAMEs to an NLB hostname** (Cloudflare zone, managed outside
-this repo). Because the gate (raw TCP) and web (HTTP) sit behind **two separate NLBs**, they use two
-hostnames and two cert-issuance methods:
+A registered domain is the only unavoidable cost besides AWS, and it's the only DNS thing you set up:
+a **root Route53 zone** (`double-nibble.com`). Everything else is automatic and **isolated per env** —
+each env's `up` creates its **own subzone** (`staging.telos.…` / `telos.…`), delegates it from the root
+(NS record), and scopes that env's external-dns + cert-manager **IRSA to only its own subzone**. So a
+compromised staging DNS/cert pod cannot touch production names (Route53 IAM can't scope below a zone,
+hence separate zones). `down` deletes the subzone + delegation.
 
-- **Web / grafana** (`telos.double-nibble.com`, `grafana.staging.telos.…`) → CNAME the **ingress-nginx
-  NLB**; cert via **HTTP-01** through ingress-nginx.
-- **Telnet gate** (prod, `gate.telos.double-nibble.com`) → CNAME the **gate NLB**; cert via **DNS-01**
-  (Cloudflare). HTTP-01 can't validate a name that resolves to the gate NLB (no HTTP listener there),
-  so the gate cert must use DNS-01 (`k8s/addons/letsencrypt-dns01.yaml`). Staging's gate is plaintext,
-  so it needs no cert.
+EKS LBs hand out **DNS names, not IPs**, and the gate (raw TCP) and web (HTTP) sit behind **two separate
+NLBs**, so within a subzone external-dns writes:
+
+- **Web / grafana** → **ALIAS A** to the **ingress-nginx NLB** (from the Ingress host); cert via
+  **HTTP-01** through ingress-nginx.
+- **Telnet gate** (prod, `gate.telos.…`) → ALIAS A to the **gate NLB** (from the Service annotation);
+  cert via **DNS-01** (Route53 via IRSA). HTTP-01 can't reach the gate NLB (no HTTP listener), so the
+  gate cert uses DNS-01 (`k8s/addons/letsencrypt-dns01.yaml`). Staging's gate is plaintext → no cert.
 
 ## Known gotchas (see RUNBOOK for mitigations)
 

@@ -27,3 +27,8 @@ output "vpc_id" {
   value       = module.network.vpc_id
   description = "VPC ID (used by the teardown LB-drain check)."
 }
+
+output "dns_zone_name" {
+  value       = module.cluster_bootstrap.dns_zone_name
+  description = "Env Route53 subzone name (down.yml purges its records before destroy)."
+}

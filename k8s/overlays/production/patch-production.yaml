@@ -1,6 +1,16 @@
 # Production hardening. Everything the dev compose flips for prod: TLS-only telnet, gRPC caller
 # token, signed session assertions, secure cookies, real OAuth + domain, and (instead of
 # TELOS_ALLOW_INSECURE) a real handoff keypair.
+#
+# external-dns creates gate.telos.double-nibble.com (-> the gate NLB) from this annotation; it must
+# match the gate-tls Certificate SAN in ingress.yaml (DNS-01) so telnet-TLS clients validate.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gate
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: gate.telos.double-nibble.com
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

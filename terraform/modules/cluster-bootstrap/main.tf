@@ -1,14 +1,81 @@
 # In-cluster platform that the app manifests assume exists: a default gp3 StorageClass (EBS CSI),
-# ingress-nginx (fronted by an AWS NLB) for the web/OAuth + Grafana Ingresses, and cert-manager
-# for Let's Encrypt. Also provisions the S3 bucket the pg-backup CronJob writes nightly dumps to.
+# ingress-nginx (fronted by an AWS NLB) for the web/OAuth + Grafana Ingresses, cert-manager for
+# Let's Encrypt, and external-dns to write Route53 records from the live NLB hostnames. Also
+# provisions the S3 bucket + IRSA role the pg-backup CronJob uses.
+#
+# DNS + certs are FULLY AUTOMATED (no manual records, no API tokens): external-dns and cert-manager
+# both reach Route53 via IRSA roles created below and scoped to the one hosted zone. external-dns
+# reads the web Ingress host + the gate Service's external-dns hostname annotation and creates the
+# CNAMEs; cert-manager does DNS-01 for the gate cert and HTTP-01 for the web cert.
 #
 # The helm + kubernetes providers are configured in the env root (they need the cluster endpoint,
 # which only exists after the eks module applies) and inherited here — so this module runs after
 # the cluster is up. See terraform/envs/*/main.tf.
 #
-# The letsencrypt ClusterIssuer is NOT created here: a kubernetes_manifest for a CRD-typed object
-# fails at plan time before the CRD exists (a first-apply chicken-and-egg). It is applied as a
-# cluster add-on with kubectl instead — see k8s/addons/letsencrypt-issuer.yaml + RUNBOOK.
+# The ClusterIssuers are NOT created here: a kubernetes_manifest for a CRD-typed object fails at plan
+# time before the CRD exists (a first-apply chicken-and-egg). They are applied by the deploy workflow
+# after cert-manager is up — see k8s/addons/*.yaml.
+
+# Per-env DNS isolation. Each env gets its OWN Route53 hosted zone (staging.telos.double-nibble.com /
+# telos.double-nibble.com), delegated from the root zone with an NS record. The controllers' IRSA is
+# scoped to THIS zone only, so a compromised staging DNS/cert pod cannot touch production names (Route53
+# IAM can't scope finer than a whole zone, hence the separate zones). Terraform owns the subzone + the
+# delegation, so `up` creates them and `down` removes them — no manual zone/NS setup.
+data "aws_route53_zone" "root" {
+  name         = var.root_dns_zone_name # the domain you own, e.g. double-nibble.com
+  private_zone = false
+}
+
+resource "aws_route53_zone" "env" {
+  name = var.dns_zone_name # the env subzone external-dns + cert-manager write into
+  tags = {
+    Project     = "telosmud"
+    Environment = var.name_prefix
+  }
+}
+
+# Delegate the subzone from the root zone (NS record) so it resolves publicly.
+resource "aws_route53_record" "delegation" {
+  zone_id = data.aws_route53_zone.root.zone_id
+  name    = var.dns_zone_name
+  type    = "NS"
+  ttl     = 300
+  records = aws_route53_zone.env.name_servers
+}
+
+# IRSA roles for the Route53-writing controllers, scoped to the ENV subzone only. The upstream module
+# wires the OIDC trust (sub + aud conditions) + the AWS-recommended policies (no hand-rolled JSON).
+module "external_dns_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.44"
+
+  role_name                     = "${var.name_prefix}-external-dns"
+  attach_external_dns_policy    = true
+  external_dns_hosted_zone_arns = [aws_route53_zone.env.arn]
+
+  oidc_providers = {
+    main = {
+      provider_arn               = var.oidc_provider_arn
+      namespace_service_accounts = ["external-dns:external-dns"]
+    }
+  }
+}
+
+module "cert_manager_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.44"
+
+  role_name                     = "${var.name_prefix}-cert-manager"
+  attach_cert_manager_policy    = true
+  cert_manager_hosted_zone_arns = [aws_route53_zone.env.arn]
+
+  oidc_providers = {
+    main = {
+      provider_arn               = var.oidc_provider_arn
+      namespace_service_accounts = ["cert-manager:cert-manager"]
+    }
+  }
+}
 
 # Default StorageClass: gp3 EBS, encrypted, bound when the first consumer pod schedules (so the
 # volume is created in the pod's AZ — which, with the single-AZ node group, is always the node's AZ).
@@ -44,6 +111,13 @@ resource "helm_release" "ingress_nginx" {
     name  = "controller.service.type"
     value = "LoadBalancer"
   }
+  # Publish the controller's LB hostname onto every Ingress's status. LOAD-BEARING: external-dns reads
+  # the Ingress status to create the web DNS record, and cert-manager HTTP-01 needs the host resolving.
+  # The chart defaults this to true, but pin it so a chart bump can't silently kill web DNS + certs.
+  set {
+    name  = "controller.publishService.enabled"
+    value = "true"
+  }
   set {
     name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"
     value = "nlb"
@@ -54,7 +128,9 @@ resource "helm_release" "ingress_nginx" {
   }
 }
 
-# cert-manager (+ CRDs) — issues the Let's Encrypt web certs and the gate's telnet-TLS cert.
+# cert-manager (+ CRDs) — issues the Let's Encrypt web certs (HTTP-01) and the gate's telnet-TLS cert
+# (DNS-01 via Route53). Its ServiceAccount is annotated with the IRSA role so the DNS-01 solver can
+# write TXT challenge records without any AWS keys.
 resource "helm_release" "cert_manager" {
   name             = "cert-manager"
   repository       = "https://charts.jetstack.io"
@@ -67,12 +143,73 @@ resource "helm_release" "cert_manager" {
     name  = "installCRDs"
     value = "true"
   }
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = module.cert_manager_irsa.iam_role_arn
+  }
+  # cert-manager must use the projected SA token to assume the IRSA role.
+  set {
+    name  = "securityContext.fsGroup"
+    value = "1001"
+  }
+}
+
+# external-dns — watches the web Ingress (host) and the gate Service (external-dns hostname
+# annotation) and writes the matching CNAMEs into Route53, targeting whatever NLB hostnames the AWS
+# cloud provider assigned. policy=sync so records are also REMOVED on teardown; txtOwnerId keeps
+# staging and production from fighting over the shared zone.
+resource "helm_release" "external_dns" {
+  name             = "external-dns"
+  repository       = "https://kubernetes-sigs.github.io/external-dns/"
+  chart            = "external-dns"
+  version          = var.external_dns_chart_version
+  namespace        = "external-dns"
+  create_namespace = true
+
+  set {
+    name  = "provider.name"
+    value = "aws"
+  }
+  set {
+    name  = "env[0].name"
+    value = "AWS_DEFAULT_REGION"
+  }
+  set {
+    name  = "env[0].value"
+    value = var.region
+  }
+  set {
+    name  = "policy"
+    value = "sync"
+  }
+  set {
+    name  = "txtOwnerId"
+    value = var.name_prefix
+  }
+  set {
+    name  = "domainFilters[0]"
+    value = var.dns_zone_name
+  }
+  set {
+    name  = "sources[0]"
+    value = "ingress"
+  }
+  set {
+    name  = "sources[1]"
+    value = "service"
+  }
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = module.external_dns_irsa.iam_role_arn
+  }
 }
 
 # ── Backups ──────────────────────────────────────────────────────────────────────────────────
 # Nightly pg_dump destination (k8s/base/pg-backup.yaml). Versioned + private; old dumps expire.
-# The CronJob authenticates with the out-of-band `backup-s3` Secret (RUNBOOK §Backups) — this just
-# creates the bucket and exposes its name.
+# The CronJob authenticates with the `backup-s3` Secret, which the deploy workflow creates from
+# OPTIONAL GH secrets (skipped if unset — backups just don't run, fine for a throwaway env). This
+# just creates the bucket + exposes its name. FOLLOW-UP: move pg-backup to IRSA (like external-dns /
+# cert-manager above) to drop the static key entirely.
 resource "aws_s3_bucket" "backups" {
   bucket = var.backup_bucket_name
 

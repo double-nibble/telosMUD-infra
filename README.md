@@ -7,13 +7,15 @@ NATS, and the Telos services) on one Graviton node, fronted by AWS load balancer
 deployment chosen for operational simplicity. (This replaced an earlier Oracle Always-Free / k3s
 design; see git history.)
 
+- **Two GitHub Actions run the whole lifecycle:** **`up`** builds an environment end-to-end
+  (`terraform apply` → secrets → issuers → deploy → rollout) and **`down`** destroys it. No manual
+  `kubectl`/`aws`/DNS steps.
 - **Terraform** (`terraform/`) provisions the VPC, EKS cluster + node group, cluster add-ons
-  (EBS CSI, ingress-nginx, cert-manager), and an S3 backup bucket. State lives in an S3 bucket with
-  native S3 locking.
-- **Kustomize** (`k8s/`) deploys the app: a `base/` plus per-environment overlays that flip the
-  dev/prod hardening deltas.
-- **GitHub Actions** (`.github/workflows/`) run `terraform apply` and `kubectl apply`, authenticating
-  to AWS keylessly via GitHub OIDC.
+  (EBS CSI, ingress-nginx, cert-manager, **external-dns**), IRSA roles, and an S3 backup bucket. State
+  lives in an S3 bucket with native S3 locking.
+- **Kustomize** (`k8s/`) deploys the app: a `base/` plus per-environment overlays. **external-dns**
+  writes Route53 records and **cert-manager** issues Let's Encrypt certs automatically.
+- **GitHub Actions** authenticate to AWS keylessly via GitHub OIDC.
 
 Start with [PLAN.md](PLAN.md) for the design and cost model, then [RUNBOOK.md](RUNBOOK.md) for the
 step-by-step bring-up.
@@ -38,13 +40,14 @@ k8s/
 scripts/                      # bootstrap-local.sh (writes tfvars)
 ```
 
-## Local setup
+## Getting started
 
-Configure the AWS CLI (`aws configure`), then run **`scripts/bootstrap-local.sh`** — it writes the
-gitignored `terraform.tfvars` (region + node defaults) for both environments. Create the S3 state
-bucket + DynamoDB lock table once (RUNBOOK §0), then `terraform init && terraform apply`.
+Do the **one-time setup** in [RUNBOOK.md](RUNBOOK.md) (an OIDC role, an S3 state bucket, a GitHub OAuth
+app, and the GH Actions secrets), then: **Actions → `up` → pick env → Run**. Tear down with **`down`**.
+That's it — no local `kubectl`/`aws` needed. `scripts/bootstrap-local.sh` is only for an optional local
+`terraform apply`.
 
 ## Status
 
-Migrated to AWS EKS. Remaining `# TODO`s are your **domain** (production OAuth/TLS) and wiring the
-CI OIDC role + optional SOPS age key. See [RUNBOOK.md](RUNBOOK.md).
+Runs on AWS EKS with one-click `up`/`down` GitHub Actions. The only things you provision by hand are the
+four one-time items in RUNBOOK §"One-time setup".

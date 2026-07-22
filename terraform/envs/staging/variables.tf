@@ -16,6 +16,18 @@ variable "vpc_cidr" {
   description = "CIDR block for the staging VPC."
 }
 
+variable "dns_zone_name" {
+  type        = string
+  default     = "staging.telos.double-nibble.com"
+  description = "The staging Route53 subzone (created + delegated by Terraform); external-dns + cert-manager are scoped to it."
+}
+
+variable "root_dns_zone_name" {
+  type        = string
+  default     = "double-nibble.com"
+  description = "Pre-existing root hosted zone you own, where the subzone NS delegation is written."
+}
+
 variable "node_instance_type" {
   type        = string
   default     = "t4g.large"

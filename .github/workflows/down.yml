@@ -1,0 +1,132 @@
+name: down
+
+# One click destroys the ENTIRE environment. Ordering matters: the gate NLB and the app's EBS
+# volumes are created by Kubernetes (not Terraform), so we remove them and WAIT for AWS to finish
+# before `terraform destroy` — otherwise the VPC delete hits DependencyViolation on lingering LB
+# ENIs. external-dns (policy=sync) removes its Route53 records when the Ingress/Service go away.
+#
+# The one-time bootstrap (OIDC role, S3 state bucket, GH secrets, Route53 zone) is NOT touched, so a
+# later `up` rebuilds everything from scratch.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to destroy"
+        type: choice
+        options: [staging, production]
+        default: staging
+      confirm:
+        description: "Type DESTROY to confirm"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }} # production pauses on the required-reviewer gate
+    defaults:
+      run:
+        working-directory: terraform/envs/${{ inputs.env }}
+    env:
+      AWS_REGION: us-east-1
+      ENVIRONMENT: ${{ inputs.env }}
+    steps:
+      # A job-level `if:` would SKIP on a mistyped confirmation and report the run green — exactly
+      # the wrong signal for a destroy. Fail loudly instead. Destroy is also pinned to main so a
+      # feature branch's terraform can never drive the teardown (same rule as terraform.yml apply).
+      - name: Guard
+        working-directory: . # runs before checkout; the env dir doesn't exist yet
+        env:
+          CONFIRM: ${{ inputs.confirm }} # via env, never interpolated into the script body
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${CONFIRM}" != "DESTROY" ]; then
+            echo "::error::confirm must be exactly DESTROY — nothing destroyed."
+            exit 1
+          fi
+          if [ "${REF}" != "refs/heads/main" ]; then
+            echo "::error::down must be dispatched from main (got ${REF})."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install kubectl /usr/local/bin/kubectl
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Remove k8s-created load balancers + volumes, then wait for drain
+        run: |
+          set -euo pipefail
+          VPC_ID="$(terraform output -raw vpc_id 2>/dev/null || true)"
+          if ! aws eks update-kubeconfig --name "telos-${ENVIRONMENT}" --region "${AWS_REGION}" 2>/dev/null; then
+            echo "::notice::cluster already gone — skipping k8s cleanup"; exit 0
+          fi
+          # Delete BOTH LoadBalancer Services first, by name. Doing this via the namespace delete
+          # alone is a trap: a namespace stuck Terminating on a finalizer never removes the Service,
+          # so its NLB survives and pins the VPC's subnets at destroy time.
+          kubectl -n telosmud delete svc gate --ignore-not-found || true
+          kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found || true
+          # Then the app namespace, which takes the PVCs with it — their Delete reclaimPolicy is what
+          # deletes the backing EBS volumes. (Sources gone => external-dns won't re-create records.)
+          kubectl delete namespace telosmud --ignore-not-found --timeout=240s || true
+          # Wait until no ELBv2 load balancers remain in the VPC — HARD FAIL on timeout (a lingering NLB
+          # ENI blocks the VPC destroy; better to stop here and retry than to fail mid-destroy).
+          if [ -n "${VPC_ID}" ]; then
+            drained=0
+            for i in $(seq 1 30); do
+              LBS="$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='${VPC_ID}'].LoadBalancerArn" --output text)"
+              [ -z "${LBS}" ] && { echo "all NLBs drained"; drained=1; break; }
+              echo "waiting for NLBs to drain (attempt $i): ${LBS}"; sleep 20
+            done
+            [ "${drained}" = 1 ] || { echo "::error::NLBs did not drain in 10m — re-run down once they're gone."; exit 1; }
+          fi
+
+      - name: Purge the env DNS subzone (so terraform can delete the now-empty zone)
+        run: |
+          set -euo pipefail
+          # Terraform owns the per-env Route53 subzone; Route53 refuses to delete a zone that still holds
+          # records, so we deterministically remove every record external-dns/cert-manager created (all
+          # but the zone's own NS + SOA) BEFORE destroy. This also closes the dangling-CNAME window.
+          ZONE="$(terraform output -raw dns_zone_name 2>/dev/null || true)"
+          [ -n "${ZONE}" ] || { echo "no dns_zone_name output — nothing to purge"; exit 0; }
+          ZID="$(aws route53 list-hosted-zones-by-name --dns-name "${ZONE}." \
+                  --query "HostedZones[?Name=='${ZONE}.'].Id | [0]" --output text)"
+          [ -n "${ZID}" ] && [ "${ZID}" != "None" ] || { echo "subzone ${ZONE} already gone"; exit 0; }
+          aws route53 list-resource-record-sets --hosted-zone-id "${ZID}" \
+            --query "ResourceRecordSets[?Type != 'NS' && Type != 'SOA']" --output json > /tmp/rrs.json
+          n="$(jq length /tmp/rrs.json)"
+          if [ "${n}" -gt 0 ]; then
+            jq -c '{Changes: [.[] | {Action:"DELETE", ResourceRecordSet: .}]}' /tmp/rrs.json > /tmp/batch.json
+            aws route53 change-resource-record-sets --hosted-zone-id "${ZID}" --change-batch file:///tmp/batch.json
+            echo "purged ${n} records from ${ZONE}"
+          else
+            echo "no app records in ${ZONE}"
+          fi
+
+      - name: Terraform destroy (retry once for async DependencyViolation)
+        run: |
+          set -euo pipefail
+          terraform destroy -input=false -auto-approve || {
+            echo "::warning::destroy failed (likely a still-draining ENI) — retrying once in 60s"
+            sleep 60
+            terraform destroy -input=false -auto-approve
+          }

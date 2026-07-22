@@ -3,6 +3,26 @@ variable "name_prefix" {
   description = "Prefix for named resources / tags, e.g. \"telos-staging\"."
 }
 
+variable "region" {
+  type        = string
+  description = "AWS region (external-dns needs it to talk to Route53)."
+}
+
+variable "oidc_provider_arn" {
+  type        = string
+  description = "EKS IRSA OIDC provider ARN (from the eks module)."
+}
+
+variable "dns_zone_name" {
+  type        = string
+  description = "The ENV subzone external-dns + cert-manager manage (created here), e.g. \"staging.telos.double-nibble.com\"."
+}
+
+variable "root_dns_zone_name" {
+  type        = string
+  description = "The pre-existing root hosted zone you own (e.g. \"double-nibble.com\"), where the env subzone's NS delegation is written."
+}
+
 variable "backup_bucket_name" {
   type        = string
   description = "Globally-unique S3 bucket name for nightly pg dumps."
@@ -24,4 +44,10 @@ variable "cert_manager_chart_version" {
   type        = string
   default     = "v1.16.2"
   description = "cert-manager Helm chart version."
+}
+
+variable "external_dns_chart_version" {
+  type        = string
+  default     = "1.15.0"
+  description = "external-dns Helm chart version."
 }
