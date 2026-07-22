@@ -42,7 +42,7 @@ jobs:
             kustomize build "${overlay}" > /tmp/rendered.yaml
             echo "==> kubeconform ${overlay}"
             kubeconform \
-              -kubernetes-version 1.30.0 \
+              -kubernetes-version 1.33.0 \
               -strict \
               -ignore-missing-schemas \
               -summary \
