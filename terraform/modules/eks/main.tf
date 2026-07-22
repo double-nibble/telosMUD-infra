@@ -12,16 +12,20 @@
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.31"
+  version = "~> 21.0"
 
-  cluster_name    = var.cluster_name
-  cluster_version = var.cluster_version
+  # NOTE: eks module 21.x dropped the `cluster_` prefix on these (name, kubernetes_version,
+  # endpoint_public_access[_cidrs], addons). authentication_mode / access_entries / node groups keep
+  # their names. The bump is required because aws provider 6.x's stricter aws_eks_cluster validation
+  # needs the module to emit the EKS Auto Mode blocks explicitly, which 21.x does and 20.x didn't.
+  name               = var.cluster_name
+  kubernetes_version = var.cluster_version
 
   # Public API endpoint so CI (OIDC) and your laptop can reach kube-apiserver via update-kubeconfig.
   # Restrict the source CIDRs in production if your operator/CI egress IPs are stable (auth is still
   # IAM/OIDC-gated regardless). GitHub-hosted runners have dynamic egress, so the default is open.
-  cluster_endpoint_public_access       = true
-  cluster_endpoint_public_access_cidrs = var.endpoint_public_access_cidrs
+  endpoint_public_access       = true
+  endpoint_public_access_cidrs = var.endpoint_public_access_cidrs
 
   # API-based access entries (not the legacy aws-auth ConfigMap). The principal that runs `apply`
   # gets cluster-admin so the helm/kubernetes providers in cluster-bootstrap can reach the cluster.
@@ -48,7 +52,7 @@ module "eks" {
   vpc_id     = var.vpc_id
   subnet_ids = var.node_subnet_ids # control-plane ENIs may use all private subnets
 
-  cluster_addons = {
+  addons = {
     coredns    = {}
     kube-proxy = {}
     vpc-cni = {
