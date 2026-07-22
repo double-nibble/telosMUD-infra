@@ -16,6 +16,12 @@ variable "vpc_cidr" {
   description = "CIDR block for the production VPC (distinct from staging's 10.10/16)."
 }
 
+variable "dns_zone_name" {
+  type        = string
+  default     = "double-nibble.com"
+  description = "Route53 hosted-zone name external-dns + cert-manager manage records in."
+}
+
 variable "node_instance_type" {
   type        = string
   default     = "t4g.large"

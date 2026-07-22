@@ -15,7 +15,12 @@ output "cluster_certificate_authority_data" {
 
 output "oidc_provider_arn" {
   value       = module.eks.oidc_provider_arn
-  description = "IRSA OIDC provider ARN (for future service-account IAM roles, e.g. pg-backup)."
+  description = "IRSA OIDC provider ARN (for service-account IAM roles: external-dns, cert-manager, pg-backup)."
+}
+
+output "oidc_provider" {
+  value       = module.eks.oidc_provider
+  description = "IRSA OIDC provider issuer URL (no https://), for hand-rolled IRSA trust conditions."
 }
 
 output "node_iam_role_name" {

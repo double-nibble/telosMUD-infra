@@ -89,19 +89,21 @@ throwaway test deployment — not a $0 design.
 
 ## Secrets
 
-**SOPS + age** for the CI-applied path (encrypted `*.enc.yaml`, decrypted with a `SOPS_AGE_KEY`
-Actions secret). Staging was bootstrapped by applying `telos-secrets` manually, so the SOPS path is
-off by default. The `backup-s3` and `grafana-*` Secrets are always out-of-band (RUNBOOK).
+The cluster Secrets (`telos-secrets`, `grafana-admin`) are created by the deploy workflow from GitHub
+Actions secrets — no manual `kubectl`. DNS + cert secrets don't exist at all: external-dns and
+cert-manager reach Route53 via **IRSA** roles, and cert-manager mints the TLS certs.
 
-## CI/CD
+## CI/CD (one-click lifecycle)
 
 - **`gomud` (app repo)** — publishes multi-arch (`amd64` + `arm64`) images to GHCR. No change here.
 - **`telosMUD-infra` (this repo)**:
-  - `terraform.yml` — `plan` on PR, `apply` staging on push to main, production via `workflow_dispatch`;
-    keyless AWS auth via GitHub OIDC. GitHub Environments gate production.
-  - `deploy.yml` — OIDC → `aws eks update-kubeconfig` → optional SOPS decrypt → `kustomize build |
-    kubectl apply`.
-  - `validate.yml` — renders every overlay + `kubeconform` (no cluster).
+  - **`up.yml`** — `workflow_dispatch`: `terraform apply` → calls `deploy.yml`. Builds a whole env.
+  - **`down.yml`** — `workflow_dispatch` (type `DESTROY`): drains the k8s NLBs + EBS, then
+    `terraform destroy`.
+  - `deploy.yml` — OIDC → `update-kubeconfig` → create Secrets from GH secrets → apply ClusterIssuers →
+    `kustomize build | kubectl apply` → wait. Reusable (`workflow_call`) + push/dispatch.
+  - `terraform.yml` — `plan` on PR, `apply` staging on push, production via dispatch. `validate.yml` —
+    renders every overlay + `kubeconform`. All keyless via GitHub OIDC; Environments gate production.
 
 ## Terraform state
 

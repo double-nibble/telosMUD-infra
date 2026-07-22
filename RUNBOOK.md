@@ -1,44 +1,64 @@
 # TelosMUD deploy runbook
 
-Step-by-step bring-up of a fresh environment on **AWS EKS**. Do `staging` first, then `production`.
-See [PLAN.md](PLAN.md) for the design and rationale.
+Normal operation is **two GitHub Actions**: run **`up`** to build an entire environment and **`down`**
+to destroy it. Everything in between — VPC, EKS, node group, ingress-nginx, cert-manager, external-dns,
+the cluster Secrets, the Let's Encrypt issuers, the app, DNS records, and TLS certs — is created by the
+pipeline. See [PLAN.md](PLAN.md) for the design. The step-by-step sections further down are the
+**reference / manual fallback** (what the pipeline does under the hood); you don't run them by hand.
 
-## 0. Prerequisites (one-time)
+## The lifecycle (one click each)
 
-- An **AWS account** with credentials that can create EKS/VPC/EC2/IAM/S3 resources.
-- Configure the **`aws` CLI**: `aws configure` (or an SSO / assumed-role profile). This is the only
-  per-collaborator setup — Terraform authenticates from your ambient AWS credentials.
-- Install locally: `terraform`, `aws` CLI, `kubectl`, `kustomize`, `sops`, `age`, `helm` (Terraform
-  drives helm, but it's handy for debugging).
+- **Bring up:** Actions → **up** → choose env → Run. Or `gh workflow run up.yml -f env=staging`.
+  Runs `terraform apply` then the app deploy (secrets + issuers + kustomize + rollout). DNS + TLS
+  converge on their own (external-dns writes Route53 from the live NLB hostnames; cert-manager issues
+  the certs).
+- **Tear down:** Actions → **down** → choose env, type `DESTROY` → Run. Or
+  `gh workflow run down.yml -f env=staging -f confirm=DESTROY`. Removes the k8s-created NLBs + EBS
+  volumes, waits for them to drain, then `terraform destroy`. The one-time setup below is untouched, so
+  a later **up** rebuilds from scratch.
 
-### Bootstrap your local config (idempotent)
+## One-time setup (survives `down`; you do this once)
 
-```sh
-scripts/bootstrap-local.sh
-```
+Only four things can't be in the pipeline (each is create-once and persists across `down`/`up`):
 
-Writes the gitignored `terraform/envs/{staging,production}/terraform.tfvars` with your region and the
-default node size / VPC CIDR. Edit that file to change the node instance type (e.g. `t4g.xlarge` for
-16 GB) or region. No secrets are involved.
+1. **An AWS identity for CI** — a GitHub-OIDC IAM role (its ARN in the **`AWS_ROLE_ARN`** repo secret),
+   trust policy allowing this repo's OIDC subject, with permissions to manage the stack. It's the
+   Terraform apply principal, so it's cluster-admin automatically (don't also list it in
+   `admin_principal_arns`). *Chicken-and-egg: CI needs an AWS identity to create AWS things.*
+2. **The Terraform state S3 bucket** — records what exists so `down` knows what to remove; it must
+   outlive `terraform destroy`. Globally-unique name; if `telosmud-tfstate` is taken, pick another and
+   update `bucket` in both `terraform/envs/*/backend.tf`:
+   ```sh
+   aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
+   aws s3api put-bucket-versioning --bucket telosmud-tfstate --versioning-configuration Status=Enabled
+   aws s3api put-public-access-block --bucket telosmud-tfstate \
+     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+   ```
+3. **A GitHub OAuth app** (per env) — lives in GitHub; you keep it and pass its id/secret as GH secrets.
+   Callback `https://<web-host>/auth/github/callback`.
+4. **The Route53 hosted zone for your domain** — you own `double-nibble.com`; the pipeline writes the
+   *records* (external-dns + cert-manager via IRSA), but can't own the domain.
 
-### Terraform remote state (create ONCE, before the first `terraform init`)
+### GitHub Actions secrets to add (once)
 
-The S3 state bucket named in `terraform/envs/*/backend.tf` must exist first. Locking is native S3
-(`use_lockfile`, Terraform ≥1.11) — **no DynamoDB table needed**. The bucket name is **globally
-unique across all of AWS**; if `telosmud-tfstate` is taken, pick another and update `bucket` in both
-`terraform/envs/{staging,production}/backend.tf`.
+| Secret | Needed for |
+|---|---|
+| `AWS_ROLE_ARN` | CI → AWS (OIDC) |
+| `POSTGRES_PASSWORD` | DB password (stable, **URL-safe** chars — it goes in the DSN). Don't rotate casually. |
+| `TELOS_WEB_SESSION_KEY` | web session signing |
+| `TELOS_GITHUB_CLIENT_ID` / `TELOS_GITHUB_CLIENT_SECRET` | OAuth login (empty → pods start, no login) |
+| `GRAFANA_ADMIN_PASSWORD` | Grafana (optional; unset → Grafana pod doesn't start) |
+| **production only:** `TELOS_ACCOUNT_CALLER_TOKEN`, `TELOS_ACCOUNT_SIGNING_KEY`, `TELOS_ACCOUNT_VERIFY_KEY`, `TELOS_HANDOFF_SIGNING_KEY`, `TELOS_HANDOFF_VERIFY_KEY` | the hardened overlay |
 
-```sh
-aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
-aws s3api put-bucket-versioning --bucket telosmud-tfstate \
-  --versioning-configuration Status=Enabled
-# State holds the cluster CA + any secrets in state — lock the bucket down:
-aws s3api put-public-access-block --bucket telosmud-tfstate \
-  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-```
+That's the whole manual surface. **You never run `kubectl` or `aws` by hand** — `up`/`down` do it all.
 
-The IAM role your CI/laptop uses needs `s3:ListBucket` on the bucket and `s3:GetObject`/`s3:PutObject`/
-`s3:DeleteObject` on `telosmud-tfstate/*` (the state read/write + lockfile).
+---
+
+# Reference / manual fallback
+
+The sections below document what the pipeline does, for debugging or a manual bring-up. Local tooling:
+`terraform`, `aws` CLI, `kubectl`, `kustomize`; `scripts/bootstrap-local.sh` writes the gitignored
+tfvars (region + node size) if you apply locally.
 
 ### CI auth (GitHub OIDC → IAM role)
 
@@ -131,20 +151,21 @@ Order is handled by the manifests: `db-init` (migrate + content import) → worl
 (postgres, nats) bind on the default **gp3** StorageClass; they are AZ-locked, which is why the node
 group is single-AZ.
 
-## 5. DNS (CNAME the hosts at the NLB hostnames)
+## 5. DNS (automatic — external-dns)
 
-EKS load balancers hand out **DNS names, not static IPs**, so point each host at the NLB hostname with
-a **CNAME** (in the `double-nibble.com` zone, managed outside this repo):
+**You don't create DNS records.** `external-dns` (installed by cluster-bootstrap, Route53 via IRSA)
+watches the web Ingress hosts and the gate Service's `external-dns.alpha.kubernetes.io/hostname`
+annotation and writes the CNAMEs into Route53, pointed at whatever NLB hostnames AWS assigned:
 
 ```
-staging.telos.double-nibble.com          CNAME  <ingress-nginx NLB hostname>   # web / OAuth
-grafana.staging.telos.double-nibble.com   CNAME  <ingress-nginx NLB hostname>   # grafana
-# gate telnet host (if you want a name instead of the raw NLB hostname):
-gate.staging.telos.double-nibble.com      CNAME  <gate NLB hostname>
+staging.telos.double-nibble.com          -> ingress-nginx NLB   # web / OAuth  (from the Ingress host)
+grafana.staging.telos.double-nibble.com   -> ingress-nginx NLB   # grafana      (from the Ingress host)
+gate.staging.telos.double-nibble.com      -> gate NLB            # telnet       (from the gate annotation)
 ```
 
-cert-manager's HTTP-01 challenge and the `gate-tls` / `web-tls` certs all need the web host resolving,
-so set DNS before (or immediately after) deploying, or the certs stay pending.
+`policy=sync` means the records are also removed on `down`. To watch it: `kubectl -n external-dns logs
+deploy/external-dns`. Manual fallback (if external-dns is off): `aws route53 change-resource-record-sets`
+with a CNAME to the NLB hostname from step 1.
 
 ## 6. Verify end-to-end
 

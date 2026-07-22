@@ -1,13 +1,11 @@
-# Let's Encrypt ClusterIssuer with a DNS-01 solver (Cloudflare), used ONLY for the production gate's
+# Let's Encrypt ClusterIssuer with a DNS-01 solver (AWS Route53), used ONLY for the production gate's
 # telnet-TLS cert (k8s/overlays/production/ingress.yaml). DNS-01 is required there because the gate's
 # hostname resolves to the gate NLB, which has no HTTP listener for an HTTP-01 challenge — DNS-01
 # validates via a DNS TXT record instead, independent of where the name points.
 #
-# PREREQUISITE (production only; apply after cert-manager is up):
-#   1. Create a Cloudflare API token scoped to Edit the double-nibble.com zone's DNS, then:
-#        kubectl -n cert-manager create secret generic cloudflare-api-token \
-#          --from-literal=api-token=<token>
-#   2. kubectl apply -f k8s/addons/letsencrypt-dns01.yaml
+# NO SECRET / NO TOKEN: cert-manager reaches Route53 via IRSA — its ServiceAccount is annotated with
+# an IAM role (terraform/modules/cluster-bootstrap: module.cert_manager_irsa) scoped to the
+# double-nibble.com hosted zone. The deploy workflow applies this issuer after cert-manager is up.
 #
 # (Staging does not need this — the staging gate is plaintext, so it has no cert.)
 apiVersion: cert-manager.io/v1
@@ -22,7 +20,4 @@ spec:
       name: letsencrypt-dns01-account-key
     solvers:
       - dns01:
-          cloudflare:
-            apiTokenSecretRef:
-              name: cloudflare-api-token
-              key: api-token
+          route53: {} # region + hosted zone auto-discovered; auth via the cert-manager IRSA role

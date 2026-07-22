@@ -1,16 +1,21 @@
 name: deploy
 
-# Renders the Kustomize overlay and applies it to the cluster. Optionally decrypts + applies the SOPS
-# secret first. Runs on manual dispatch and on pushes to main that touch k8s/.
+# Self-contained app deploy: fetch kubeconfig, CREATE the cluster Secrets from GitHub Actions secrets,
+# apply the cert-manager ClusterIssuers, then render + apply the Kustomize overlay and wait for rollout.
+# No manual kubectl/secret steps — everything the cluster needs is created here from GH secrets.
 #
-# REQUIRED repo secrets for this to actually reach a cluster:
-#   - AWS_ROLE_ARN — the IAM role this workflow assumes via GitHub OIDC. It must be granted an EKS
-#     access entry with cluster-admin (terraform passes it via admin_principal_arns). kubeconfig is
-#     fetched at runtime with `aws eks update-kubeconfig` — no base64 kubeconfig secret needed.
-# OPTIONAL (only if you keep cluster Secrets under SOPS in this repo):
-#   - SOPS_AGE_KEY + a committed k8s/overlays/<env>/secrets.enc.yaml. When either is absent the secrets
-#     step is SKIPPED with a note — the cluster's already-applied `telos-secrets` is used as-is. (Staging
-#     was bootstrapped by applying secrets manually, so the SOPS path is off by default.)
+# Triggers: push to main touching k8s/**, manual dispatch, or workflow_call (from up.yml).
+#
+# REQUIRED GitHub Actions secrets:
+#   AWS_ROLE_ARN            IAM role assumed via OIDC (already cluster-admin as the TF apply principal)
+#   POSTGRES_PASSWORD       stable DB password (do NOT rotate casually — postgres sets it on first init)
+#   TELOS_WEB_SESSION_KEY   web session signing key
+# OPTIONAL:
+#   TELOS_GITHUB_CLIENT_ID / TELOS_GITHUB_CLIENT_SECRET   real OAuth login (empty => pods start, no login)
+#   GRAFANA_ADMIN_PASSWORD                                 Grafana admin (unset => Grafana pod won't start)
+#   PRODUCTION only, for the hardened overlay:
+#     TELOS_ACCOUNT_CALLER_TOKEN, TELOS_ACCOUNT_SIGNING_KEY, TELOS_ACCOUNT_VERIFY_KEY,
+#     TELOS_HANDOFF_SIGNING_KEY, TELOS_HANDOFF_VERIFY_KEY
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +24,12 @@ on:
         type: choice
         options: [staging, production]
         default: staging
+  workflow_call:
+    inputs:
+      env:
+        description: "Environment to deploy"
+        type: string
+        required: true
   push:
     branches: [main]
     paths: ["k8s/**"]
@@ -30,68 +41,103 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Ties the job to a GitHub Environment. `staging` has no protection → deploys immediately on push.
-    # `production` has a required reviewer → the run PAUSES with a "Review deployments" button that must
-    # be approved before this job starts. Production only ever appears here via workflow_dispatch (the
-    # matrix below is staging-only on push), so the gate is the deliberate one-click prod approval.
-    environment: ${{ matrix.env }}
-    strategy:
-      matrix:
-        # On push, deploy staging only; production is manual (workflow_dispatch) for safety.
-        env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging"]') }}
+    # `staging` deploys immediately; `production` pauses on the required-reviewer gate. Push always
+    # targets staging (paths: k8s/**); production only via dispatch/workflow_call.
+    environment: ${{ inputs.env || 'staging' }}
     env:
       AWS_REGION: us-east-1
+      ENVIRONMENT: ${{ inputs.env || 'staging' }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tooling (kubectl, kustomize, sops)
+      - name: Install kubectl + kustomize
         run: |
           set -euo pipefail
-          # kubectl (pinned to the current stable release)
           curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install kubectl /usr/local/bin/kubectl
-          # kustomize (pinned versioned asset — the upstream install_kustomize.sh script's GitHub-API
-          # version probe intermittently fails to resolve the tarball ("kustomize_v*_...tar.gz: Cannot
-          # open"), so fetch a known release directly, same discipline as the sops pin below)
           KUSTOMIZE_VERSION=v5.4.3
           curl -fsSLo kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          tar -xzf kustomize.tar.gz kustomize
-          sudo install kustomize /usr/local/bin/kustomize
-          # sops (versioned asset path — NOT latest/download, which does not serve a version-named file)
-          curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.9.0/sops-v3.9.0.linux.amd64
-          sudo install sops /usr/local/bin/sops
+          tar -xzf kustomize.tar.gz kustomize && sudo install kustomize /usr/local/bin/kustomize
 
-      # Keyless AWS auth via GitHub OIDC, then fetch the kubeconfig from EKS. The assumed role must
-      # have an EKS access entry with cluster-admin (terraform admin_principal_arns) or apply is denied.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Configure kubeconfig (aws eks update-kubeconfig)
+      - name: Configure kubeconfig
         run: |
           set -euo pipefail
-          aws eks update-kubeconfig --name "telos-${{ matrix.env }}" --region "${AWS_REGION}"
-          kubectl version --client >/dev/null
+          aws eks update-kubeconfig --name "telos-${ENVIRONMENT}" --region "${AWS_REGION}"
+          kubectl get ns telosmud >/dev/null 2>&1 || kubectl create namespace telosmud
 
-      - name: Apply cluster Secrets (SOPS — optional)
+      - name: Create telos-secrets (from GitHub Actions secrets)
         env:
-          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          TELOS_WEB_SESSION_KEY: ${{ secrets.TELOS_WEB_SESSION_KEY }}
+          TELOS_GITHUB_CLIENT_ID: ${{ secrets.TELOS_GITHUB_CLIENT_ID }}
+          TELOS_GITHUB_CLIENT_SECRET: ${{ secrets.TELOS_GITHUB_CLIENT_SECRET }}
+          TELOS_ACCOUNT_CALLER_TOKEN: ${{ secrets.TELOS_ACCOUNT_CALLER_TOKEN }}
+          TELOS_ACCOUNT_SIGNING_KEY: ${{ secrets.TELOS_ACCOUNT_SIGNING_KEY }}
+          TELOS_ACCOUNT_VERIFY_KEY: ${{ secrets.TELOS_ACCOUNT_VERIFY_KEY }}
+          TELOS_HANDOFF_SIGNING_KEY: ${{ secrets.TELOS_HANDOFF_SIGNING_KEY }}
+          TELOS_HANDOFF_VERIFY_KEY: ${{ secrets.TELOS_HANDOFF_VERIFY_KEY }}
         run: |
           set -euo pipefail
-          ENC="k8s/overlays/${{ matrix.env }}/secrets.enc.yaml"
-          if [ -z "${SOPS_AGE_KEY:-}" ] || [ ! -f "${ENC}" ]; then
-            echo "::notice::SOPS not configured (no SOPS_AGE_KEY and/or ${ENC}) — skipping. Using the cluster's existing telos-secrets."
+          if [ -z "${POSTGRES_PASSWORD}" ] || [ -z "${TELOS_WEB_SESSION_KEY}" ]; then
+            echo "::error::Missing required secrets POSTGRES_PASSWORD and/or TELOS_WEB_SESSION_KEY."
+            echo "::error::Add them in repo Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          # Base keys every env needs. The DSN embeds the same password postgres initializes with.
+          args=(
+            --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+            --from-literal=TELOS_POSTGRES_DSN="postgres://telos:${POSTGRES_PASSWORD}@postgres:5432/telosmud?sslmode=disable"
+            --from-literal=TELOS_WEB_SESSION_KEY="${TELOS_WEB_SESSION_KEY}"
+            --from-literal=TELOS_GITHUB_CLIENT_ID="${TELOS_GITHUB_CLIENT_ID}"
+            --from-literal=TELOS_GITHUB_CLIENT_SECRET="${TELOS_GITHUB_CLIENT_SECRET}"
+          )
+          # Production overlay also references these (staging drops them via TELOS_ALLOW_INSECURE).
+          if [ "${ENVIRONMENT}" = "production" ]; then
+            for k in TELOS_ACCOUNT_CALLER_TOKEN TELOS_ACCOUNT_SIGNING_KEY TELOS_ACCOUNT_VERIFY_KEY \
+                     TELOS_HANDOFF_SIGNING_KEY TELOS_HANDOFF_VERIFY_KEY; do
+              if [ -z "${!k}" ]; then
+                echo "::error::production requires secret ${k}"; exit 1
+              fi
+              args+=(--from-literal=${k}="${!k}")
+            done
+          fi
+          kubectl -n telosmud create secret generic telos-secrets "${args[@]}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create grafana-admin (optional)
+        env:
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GRAFANA_ADMIN_PASSWORD}" ]; then
+            echo "::notice::GRAFANA_ADMIN_PASSWORD unset — skipping. Grafana will not start until it exists."
             exit 0
           fi
-          sops -d "${ENC}" | kubectl apply -f -
+          kubectl -n telosmud create secret generic grafana-admin \
+            --from-literal=admin-password="${GRAFANA_ADMIN_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply cert-manager ClusterIssuers
+        run: |
+          set -euo pipefail
+          # Wait for the cert-manager webhook (installed by Terraform) before applying CRD objects.
+          kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
+          kubectl apply -f k8s/addons/letsencrypt-issuer.yaml        # HTTP-01 (web certs)
+          if [ "${ENVIRONMENT}" = "production" ]; then
+            kubectl apply -f k8s/addons/letsencrypt-dns01.yaml       # DNS-01 (gate telnet-TLS cert)
+          fi
 
       - name: Recreate db-init job (Jobs are immutable) to re-run migrate + content import
         run: kubectl -n telosmud delete job db-init --ignore-not-found
 
       - name: Deploy
-        run: kustomize build "k8s/overlays/${{ matrix.env }}" | kubectl apply -f -
+        run: kustomize build "k8s/overlays/${ENVIRONMENT}" | kubectl apply -f -
 
       - name: Wait for content import + rollout
         run: |

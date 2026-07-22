@@ -1,6 +1,16 @@
 # Staging posture: plaintext telnet (no TLS) + real GitHub OAuth (same as prod, exercising the
 # real login path on the same hardened release images), plus the keyless/tokenless insecure
 # opt-ins the single-node cluster needs. NEVER copy the insecure/plaintext bits to production.
+#
+# external-dns creates this hostname (-> the gate NLB) automatically from the annotation below;
+# players telnet gate.staging.telos.double-nibble.com:4000.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gate
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: gate.staging.telos.double-nibble.com
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
