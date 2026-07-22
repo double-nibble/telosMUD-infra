@@ -6,7 +6,7 @@ variable "region" {
 
 variable "cluster_version" {
   type        = string
-  default     = "1.33"
+  default     = "1.36"
   description = "EKS Kubernetes control-plane version."
 }
 

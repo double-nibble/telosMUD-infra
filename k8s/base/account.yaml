@@ -30,7 +30,7 @@ spec:
       serviceAccountName: telos-init
       initContainers:
         - name: wait-db-init
-          image: rancher/kubectl:v1.33.1 # keep within one minor of the EKS control plane (1.33)
+          image: rancher/kubectl:v1.36.1 # keep within one minor of the EKS control plane (1.36)
           command: ["kubectl", "wait", "--for=condition=complete", "--timeout=600s", "job/db-init"]
       containers:
         - name: account
