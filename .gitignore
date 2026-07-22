@@ -4,12 +4,12 @@
 *.tfstate.*
 crash.log
 crash.*.log
-# Real tfvars carry your tenancy identifiers — keep them local. Commit only *.example.
+# Real tfvars are machine-local (region / node size). Commit only *.example.
 terraform.tfvars
 *.auto.tfvars
 *.tfvars.local
 
-# Local env scratch file (OCIDs, namespace). Not credentials, but keep it out of git.
+# Local env scratch file. Not credentials, but keep it out of git.
 .env
 override.tf
 override.tf.json

@@ -1,35 +1,36 @@
 locals {
-  name_prefix = "telos-production"
-  node_fqdn   = "telos.double-nibble.com"
+  name_prefix  = "telos-production"
+  cluster_name = "telos-production"
+  # Stable DNS name for the web/OAuth site. CNAME this at the ingress-nginx NLB hostname after apply
+  # (see RUNBOOK §DNS). The telnet gate has its own NLB (k8s/base/gate.yaml).
+  node_fqdn = "telos.double-nibble.com"
 }
+
+data "aws_caller_identity" "current" {}
 
 module "network" {
-  source           = "../../modules/network"
-  compartment_ocid = var.compartment_ocid
-  name_prefix      = local.name_prefix
+  source      = "../../modules/network"
+  name_prefix = local.name_prefix
+  vpc_cidr    = var.vpc_cidr
 }
 
-module "compute" {
-  source              = "../../modules/compute"
-  compartment_ocid    = var.compartment_ocid
-  name_prefix         = local.name_prefix
-  subnet_id           = module.network.subnet_id
-  availability_domain = var.availability_domain
-  image_ocid          = var.image_ocid
-  ssh_public_key_path = var.ssh_public_key_path
-  node_fqdn           = local.node_fqdn
+module "eks" {
+  source          = "../../modules/eks"
+  name_prefix     = local.name_prefix
+  cluster_name    = local.cluster_name
+  cluster_version = var.cluster_version
 
-  # Production: the other half of the free A1 pool by default (overridable to chase capacity).
-  ocpus           = var.ocpus
-  memory_gbs      = var.memory_gbs
-  boot_volume_gbs = 50
+  vpc_id          = module.network.vpc_id
+  node_subnet_ids = module.network.private_subnet_ids
+
+  node_instance_type = var.node_instance_type
+  node_ami_type      = var.node_ami_type
+
+  admin_principal_arns = var.admin_principal_arns
 }
 
-module "k3s" {
-  source               = "../../modules/k3s"
-  public_ip            = module.compute.public_ip
-  api_host             = local.node_fqdn
-  instance_id          = module.compute.instance_id
-  ssh_private_key_path = var.ssh_private_key_path
-  kubeconfig_path      = "${path.root}/kubeconfig"
+module "cluster_bootstrap" {
+  source             = "../../modules/cluster-bootstrap"
+  name_prefix        = local.name_prefix
+  backup_bucket_name = "telos-production-backups-${data.aws_caller_identity.current.account_id}"
 }

@@ -34,8 +34,8 @@ jobs:
       - name: Render + validate every overlay
         run: |
           set -euo pipefail
-          # Validate against a real Kubernetes schema version. CRDs (Traefik Middleware, cert-manager
-          # Certificate) have no built-in schema, so -ignore-missing-schemas skips THOSE while still
+          # Validate against a real Kubernetes schema version. CRDs (cert-manager Certificate /
+          # ClusterIssuer) have no built-in schema, so -ignore-missing-schemas skips THOSE while still
           # strictly validating every core resource. -strict rejects unknown fields (a typo'd key).
           for overlay in k8s/overlays/*/; do
             echo "==> kustomize build ${overlay}"

@@ -1,5 +1,6 @@
-# Let's Encrypt production ClusterIssuer, HTTP-01 solver via Traefik (needs port 80 open + the
-# domain's A-record pointing at the node). Install cert-manager first (see RUNBOOK), then apply this.
+# Let's Encrypt production ClusterIssuer, HTTP-01 solver via ingress-nginx (needs port 80 reachable
+# on the ingress NLB + the domain CNAME'd at that NLB hostname). cert-manager + ingress-nginx are
+# installed by terraform/modules/cluster-bootstrap; apply this add-on after the cluster is up (RUNBOOK).
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -13,4 +14,4 @@ spec:
     solvers:
       - http01:
           ingress:
-            class: traefik
+            class: nginx

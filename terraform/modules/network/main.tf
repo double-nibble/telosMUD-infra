@@ -1,63 +1,42 @@
-# A minimal public VCN: one subnet, an internet gateway, and a security list that opens
-# the telnet + web ports. NOTE: the Oracle instance ALSO has a host firewall (iptables);
-# cloud-init in the compute module opens the same ports there. Both layers must allow a port.
+# A VPC for the EKS cluster, built on the upstream terraform-aws-modules/vpc/aws module.
+#
+# Two AZs (EKS requires subnets in >= 2 AZs for the control plane), public + private subnets,
+# and a SINGLE NAT gateway (cost lever — one NAT per env, not one-per-AZ). The managed node
+# group is pinned to ONE private subnet by the eks module so a single-replica StatefulSet and
+# its AZ-locked EBS volume always land in the same AZ (see modules/eks). Public subnets host the
+# internet-facing NLBs (gate telnet + ingress-nginx web); private subnets host the nodes.
 
-resource "oci_core_vcn" "this" {
-  compartment_id = var.compartment_ocid
-  cidr_blocks    = [var.vcn_cidr]
-  display_name   = "${var.name_prefix}-vcn"
-  dns_label      = replace(var.name_prefix, "-", "")
+data "aws_availability_zones" "available" {
+  state = "available"
 }
 
-resource "oci_core_internet_gateway" "this" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.name_prefix}-igw"
+locals {
+  # First two AZs in the region. Deterministic (the API returns them sorted), so re-applies are stable.
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
 }
 
-resource "oci_core_route_table" "this" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.name_prefix}-rt"
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.13"
 
-  route_rules {
-    destination       = "0.0.0.0/0"
-    network_entity_id = oci_core_internet_gateway.this.id
+  name = "${var.name_prefix}-vpc"
+  cidr = var.vpc_cidr
+  azs  = local.azs
+
+  # /20 private + /24 public per AZ, carved from the /16 vpc_cidr.
+  private_subnets = [for i in range(length(local.azs)) : cidrsubnet(var.vpc_cidr, 4, i)]
+  public_subnets  = [for i in range(length(local.azs)) : cidrsubnet(var.vpc_cidr, 8, i + 48)]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = true # one NAT for the whole env (cost); nodes egress through it
+  enable_dns_hostnames = true
+
+  # EKS discovers subnets for load balancers via these tags. Public = internet-facing LBs,
+  # private = internal LBs. Without them, a Service type:LoadBalancer can't find a subnet.
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = "1"
   }
-}
-
-resource "oci_core_security_list" "this" {
-  compartment_id = var.compartment_ocid
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.name_prefix}-sl"
-
-  # Allow all egress.
-  egress_security_rules {
-    destination = "0.0.0.0/0"
-    protocol    = "all"
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb" = "1"
   }
-
-  # One ingress rule per opened TCP port.
-  dynamic "ingress_security_rules" {
-    for_each = toset(var.ingress_tcp_ports)
-    content {
-      protocol = "6" # TCP
-      source   = "0.0.0.0/0"
-      tcp_options {
-        min = ingress_security_rules.value
-        max = ingress_security_rules.value
-      }
-    }
-  }
-}
-
-resource "oci_core_subnet" "public" {
-  compartment_id             = var.compartment_ocid
-  vcn_id                     = oci_core_vcn.this.id
-  cidr_block                 = var.subnet_cidr
-  display_name               = "${var.name_prefix}-public"
-  route_table_id             = oci_core_route_table.this.id
-  security_list_ids          = [oci_core_security_list.this.id]
-  prohibit_public_ip_on_vnic = false
-  dns_label                  = "public"
 }

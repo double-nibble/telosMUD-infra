@@ -1,39 +1,59 @@
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.11" # native S3 state locking (use_lockfile) below
 
   required_providers {
-    oci = {
-      source  = "oracle/oci"
+    aws = {
+      source  = "hashicorp/aws"
       version = ">= 5.0"
     }
-    null = {
-      source  = "hashicorp/null"
-      version = ">= 3.2"
+    helm = {
+      source  = "hashicorp/helm"
+      version = ">= 2.13, < 3.0"
     }
-    local = {
-      source  = "hashicorp/local"
-      version = ">= 2.4"
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.30"
     }
   }
 
-  # State in an OCI Object Storage bucket (S3-compatible), same bucket as production (different key).
-  # Auth uses a Customer Secret Key (Access/Secret) via AWS_ env vars — see RUNBOOK. Migrate the
-  # existing LOCAL state up once with `terraform init -migrate-state` before relying on CI (CI runs
-  # -input=false and will NOT prompt to migrate — an un-migrated bucket means an empty remote state).
+  # State in an S3 bucket with native S3 locking (use_lockfile — no DynamoDB table needed). Create the
+  # bucket ONCE, out of band, before the first `terraform init` (see RUNBOOK §0). The state bucket
+  # region is independent of var.region (where the cluster deploys) — it just has to be a real region.
   backend "s3" {
-    bucket                      = "telosmud-tfstate"
-    key                         = "staging/terraform.tfstate"
-    region                      = "us-ashburn-1"
-    endpoints                   = { s3 = "https://idknnsi3cdrb.compat.objectstorage.us-ashburn-1.oraclecloud.com" }
-    skip_region_validation      = true
-    skip_credentials_validation = true
-    skip_requesting_account_id  = true
-    skip_s3_checksum            = true
-    use_path_style              = true
+    bucket       = "telosmud-tfstate"
+    key          = "staging/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+    encrypt      = true
   }
 }
 
-provider "oci" {
-  # Auth via ~/.oci/config (DEFAULT profile) or TF_VAR_/env vars. See RUNBOOK step 0.
+provider "aws" {
   region = var.region
+}
+
+# The kubernetes/helm providers talk to the cluster the eks module creates. Auth via the AWS CLI's
+# `eks get-token` (the aws CLI must be on PATH — CI installs it, local runs need `aws configure`).
+# On a first apply these attributes are unknown until the cluster exists; Terraform defers the
+# cluster-bootstrap resources until then.
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+    }
+  }
 }

@@ -1,138 +1,141 @@
 # TelosMUD deployment plan
 
-A $0, two-environment (staging + production) Kubernetes deployment for a low-traffic
-(2–3 concurrent users) proof-of-concept.
+A two-environment (staging + production) Kubernetes deployment on **AWS EKS** for a low-traffic
+(2–3 concurrent users) proof-of-concept. Not free — a paid, managed control plane and cloud load
+balancers — chosen for operational simplicity over the previous Oracle Always-Free / k3s design.
 
 ## Decisions (settled)
 
 | Decision | Choice | Why |
 |---|---|---|
-| Provider | **Oracle Cloud Always-Free** | Only genuine $0 K8s-capable compute (4 ARM cores / 24 GB / 200 GB block, no expiry). |
-| Kubernetes | **k3s** (one node per env) | Conformant K8s in a single binary; built-in `servicelb` gives a free L4 LoadBalancer. |
-| Isolation | **Two clusters, two VMs** | Clean blast-radius separation; both fit in the free A1 pool. |
-| IaC | **Terraform (OCI provider)** | All infra as HCL, per the brief. State in an OCI Object Storage bucket. |
-| App delivery | **GitHub Actions + Kustomize** | `kustomize build overlays/<env> \| kubectl apply`. No extra in-cluster services. |
-| World topology | **Single-shard** (all zones, one world) | No cross-shard handoff → no director, no handoff keypair. Mirrors `docker-compose.single.yml`. |
-| Images | **arm64, GHCR** | A1 is ARM; app binaries are static `CGO_ENABLED=0`, so cross-compile is free. |
+| Provider | **AWS** | Managed, familiar, no Always-Free capacity roulette. Cost is accepted. |
+| Kubernetes | **EKS** (one managed cluster per env) | Managed control plane; no self-hosted k3s to babysit. |
+| Nodes | **One managed node group, single node, single AZ** | Mirrors the old single-box topology; EBS is AZ-locked so pod + volume must share an AZ. |
+| Node arch | **Graviton (arm64), `t4g.large`** | The GHCR images are multi-arch; arm64 is cheaper. `t4g.xlarge` if the LGTM stack is memory-tight. |
+| IaC | **Terraform (AWS + helm + kubernetes providers)** | VPC/EKS via the community modules; ingress-nginx + cert-manager via helm. State in S3 + DynamoDB. |
+| App delivery | **GitHub Actions + Kustomize** | `kustomize build overlays/<env> \| kubectl apply`. CI auth is keyless (GitHub OIDC → IAM role). |
+| Telnet front door | **NLB** (`gate` Service `type: LoadBalancer` + nlb annotation) | An L4 Network Load Balancer forwards raw TCP untouched — the one thing an ALB / HTTP ingress can't do. |
+| Web / OAuth + TLS | **ingress-nginx + cert-manager (Let's Encrypt, HTTP-01)** | Portable; the same LE issuer also mints the gate's telnet-TLS cert, which mounts into the gate pod. |
+| Storage | **gp3 EBS via the EBS CSI driver** | Real size-enforced block volumes (default `gp3` StorageClass); AZ-locked. |
+| World topology | **Single-shard** (all zones, one world) | No cross-shard handoff coordinator. Mirrors `docker-compose.single.yml`. |
+| Images | **multi-arch, GHCR** | `ghcr.io/double-nibble/telos-*` already build `linux/amd64,linux/arm64`. |
 
-## Why not the "obvious" options
+## Why these shapes
 
-- **GKE / EKS managed control planes** can't reach $0: EKS is ~$73/mo/cluster; GKE waives
-  the fee for one cluster but nodes cost money, and a `LoadBalancer` Service for the raw-TCP
-  telnet gate is ~$18/mo per env.
-- **Cloud Run / App Engine / Lambda** are HTTP/gRPC-only ingress — they cannot terminate the
-  gate's **raw TCP telnet** connection. Non-starter for the front door.
-- **Managed Postgres/Redis** (~$15/mo each) is the other budget-killer; self-host in-cluster.
-- **GCP always-free** is one `e2-micro` (1 GB) — too small for k3s + the whole stack.
+The single design-defining constraint is that **`telos-gate` is a raw TCP telnet listener.** That
+rules out ALB / API Gateway / any HTTP-only ingress for the front door. On k3s, Klipper `servicelb`
+bound the port on the node IP for free; on EKS the equivalent is a **Network Load Balancer** (L4),
+which the in-tree AWS cloud provider provisions from a plain `Service type: LoadBalancer` + the NLB
+annotation — no AWS Load Balancer Controller required. Web/OAuth is ordinary HTTP, so it rides a
+second NLB fronting **ingress-nginx**.
 
-The single cost-defining constraint is that **`telos-gate` is a raw TCP telnet listener.**
-k3s's Klipper `servicelb` binds the telnet port on the node's public IP via `hostPort`, so
-we get an L4 LoadBalancer for free. That trick is what makes K8s affordable here.
+cert-manager stays (rather than ACM) because the gate needs a real cert **file** mounted for telnet
+TLS — ACM terminates at the LB and can't hand a cert to a pod. One Let's Encrypt ClusterIssuer serves
+both the web Ingress and the gate's `Certificate`.
 
-## Resource budget (Oracle Always-Free A1)
+**Single-AZ, single-node** is deliberate: the single-replica StatefulSets (postgres, nats) use
+AZ-locked EBS volumes, so the node group is pinned to one subnet/AZ to keep pod and volume together.
 
-Allotment: **4 OCPU + 24 GB RAM + 200 GB block storage**, poolable across ≤4 VMs.
+## Resource budget (per env)
 
-| | Staging VM | Production VM |
-|---|---|---|
-| Shape | `VM.Standard.A1.Flex` 2 OCPU / 12 GB | `VM.Standard.A1.Flex` 2 OCPU / 12 GB |
-| Boot volume | ~50 GB | ~50 GB |
-| OS image | Ubuntu 22.04 **arm64** | Ubuntu 22.04 **arm64** |
+| | Value |
+|---|---|
+| Control plane | EKS managed (one per env) |
+| Node | 1× `t4g.large` (2 vCPU / 8 GB) Graviton, single AZ; `t4g.xlarge` (16 GB) if the LGTM stack OOMs |
+| Storage | gp3 EBS PVCs: postgres 10Gi + nats 5Gi + Loki 3Gi + Prometheus 3Gi + Grafana 1Gi |
+| Load balancers | 2 NLBs (gate telnet :4000, ingress-nginx web :443/:80) |
+| Networking | VPC, 2 AZs, single NAT gateway |
+| Backups | S3 bucket (versioned, lifecycle-expired) |
 
-Idle footprint per env (k3s ~512 MB + PG + Redis + NATS + world + gate + account) is well
-under 2 GB, so 12 GB is generous headroom.
+## Cost model (rough, both envs, on-demand, us-east-1)
+
+~$250–350/mo: 2× EKS control plane (~$146), 2× node, 4× NLB, 2× NAT gateway, EBS + S3 minimal. Levers:
+single NAT per env (default), and `terraform destroy` per env when you're done testing. This is a
+throwaway test deployment — not a $0 design.
 
 ## Per-cluster architecture
 
 ```
                  Internet
-                    │
-        ┌───────────┴───────────┐
-        │  Oracle A1 VM (k3s)    │
-        │                        │
-  telnet:4000/tls ── Service(LoadBalancer, servicelb) ─▶ telos-gate
-   web:443 ──────── Traefik Ingress + cert-manager ────▶ telos-account (web :8080)
-        │                        │
-        │   telos-world (:9090, single shard, all zones)
-        │   telos-account (:9100 gRPC)
-        │   postgres / redis / nats  (StatefulSets, local-path PVCs)
-        │   migrate + seed  (Jobs, run-once on deploy)
-        └────────────────────────┘
+        ┌───────────┴────────────┐
+  telnet:4000/tls           web:443 / :80
+    NLB (gate Service)        NLB (ingress-nginx)
+        │                         │
+        ▼                         ▼  Ingress -> account (web :8080)
+   telos-gate                     └─ Ingress -> grafana :3000 (basic auth)
+        │
+   ┌────┴──────────────── EKS cluster (1 node, 1 AZ) ─────────────────┐
+   │  telos-world (:9090, single shard, all zones)                    │
+   │  telos-account (:9100 gRPC + :8080 web)                          │
+   │  postgres / nats  (StatefulSets, gp3 EBS)  |  redis (ephemeral)  │
+   │  db-init (migrate + content import) + pg-backup (CronJob → S3)   │
+   │  LGTM: loki / prometheus / grafana / otel-collector (DaemonSet)  │
+   │  addons: EBS CSI, ingress-nginx, cert-manager (Let's Encrypt)    │
+   └──────────────────────────────────────────────────────────────────┘
 ```
-
-- **Telnet** → `Service type: LoadBalancer` (Klipper binds it on the node IP). Free.
-- **Web/OAuth** → Traefik (bundled with k3s) + **cert-manager** (Let's Encrypt). The same LE
-  cert is mounted into the gate for **telnet TLS** (`TELOS_GATE_TLS_CERT/KEY`).
-- **Data** → StatefulSets on `local-path` PVCs. Backup = `pg_dump` CronJob → OCI Object Storage.
 
 ## Prod hardening deltas (base → production overlay)
 
-The dev compose documents exactly what flips in prod. The production overlay must:
-
 | Setting | dev/staging | production |
 |---|---|---|
-| `TELOS_ALLOW_INSECURE` | `1` | unset (provide `TELOS_HANDOFF_*` keypair if the single-node boot guard needs it — **verify**) |
-| `TELOS_DEV_AUTOAUTH` | `1` (staging) | unset |
+| `TELOS_ALLOW_INSECURE` | `1` | unset (real `TELOS_HANDOFF_*` keypair instead) |
 | `TELOS_GATE_ALLOW_PLAINTEXT` | `1` | unset (TLS-only via `TELOS_GATE_TLS_LISTEN/CERT/KEY`) |
-| `TELOS_ACCOUNT_CALLER_TOKEN` | unset | set (gRPC caller auth, #247) |
-| `TELOS_ACCOUNT_SIGNING_KEY` / `_VERIFY_KEY` | unset | set (signed session assertions) |
+| `TELOS_ACCOUNT_CALLER_TOKEN` | unset | set (gRPC caller auth) |
+| `TELOS_ACCOUNT_SIGNING_KEY` / `_VERIFY_KEY` | unset | set (signed session assertions; verify key also on the world) |
 | `TELOS_WEB_SECURE_COOKIES` | `0` | `1` |
-| `TELOS_WEB_PUBLIC_URL` | `http://localhost:8080` | `https://<domain>` |
-| `TELOS_WEB_SESSION_KEY` | dev default | strong random secret |
-| `TELOS_GITHUB_CLIENT_ID/SECRET` | dev OAuth app | prod OAuth app (real callback URL) |
-| Postgres password | `telos` | strong random secret |
-
-> **Staging** can keep `TELOS_DEV_AUTOAUTH=1` (bare-name login) so you can smoke-test the
-> telnet path without OAuth. **Production** requires a domain + real GitHub OAuth app.
+| `TELOS_WEB_PUBLIC_URL` | `https://staging.<domain>` | `https://<domain>` |
+| GitHub OAuth app | staging app | prod app (real callback URL) |
+| Postgres password | dev | strong random secret |
 
 ## Secrets
 
-**SOPS + age.** Encrypted secret manifests are committed to this repo; CI decrypts them with
-an age key stored as a GitHub Actions secret. Keeps the repo self-contained and avoids a
-sprawl of raw Actions secrets. `.sops.yaml` pins which files are encrypted.
-
-Secrets to manage per env: Postgres password, `TELOS_ACCOUNT_CALLER_TOKEN`, account
-signing/verify keypair, `TELOS_WEB_SESSION_KEY`, GitHub OAuth client id/secret, the GHCR
-image-pull token, and (prod) the cert-manager DNS provider token.
+**SOPS + age** for the CI-applied path (encrypted `*.enc.yaml`, decrypted with a `SOPS_AGE_KEY`
+Actions secret). Staging was bootstrapped by applying `telos-secrets` manually, so the SOPS path is
+off by default. The `backup-s3` and `grafana-*` Secrets are always out-of-band (RUNBOOK).
 
 ## CI/CD
 
-- **`gomud` (app repo)** — on merge/tag: `docker buildx` → push **arm64** images to
-  `ghcr.io/<owner>/telos-{gate,world,account,migrate,seed}`. *(This is a change to the app
-  repo's existing workflow — its Dockerfile already builds static binaries; add `linux/arm64`.)*
+- **`gomud` (app repo)** — publishes multi-arch (`amd64` + `arm64`) images to GHCR. No change here.
 - **`telosMUD-infra` (this repo)**:
-  - `terraform.yml` — `plan` on PR, `apply` on merge, matrixed over `envs/{staging,production}`.
-  - `deploy.yml` — `sops -d` secrets → `kustomize build overlays/<env>` → `kubectl apply`,
-    using a per-env kubeconfig stored as a GitHub Actions secret.
+  - `terraform.yml` — `plan` on PR, `apply` staging on push to main, production via `workflow_dispatch`;
+    keyless AWS auth via GitHub OIDC. GitHub Environments gate production.
+  - `deploy.yml` — OIDC → `aws eks update-kubeconfig` → optional SOPS decrypt → `kustomize build |
+    kubectl apply`.
+  - `validate.yml` — renders every overlay + `kubeconform` (no cluster).
 
 ## Terraform state
 
-An **OCI Object Storage bucket** (S3-compatible backend), also free-tier. One bucket, a key
-per environment. Configured in `terraform/envs/*/backend.tf`.
+An **S3 bucket** (`telosmud-tfstate`, one key per env) with **native S3 state locking**
+(`use_lockfile`, Terraform ≥1.11 — no DynamoDB table). Created once, out of band, before the first
+`terraform init` (RUNBOOK §0).
 
 ## Domain & TLS
 
-A ~$10/yr domain is the only unavoidable non-free cost, needed for real GitHub OAuth (secure
-cookies require a stable HTTPS host). cert-manager issues Let's Encrypt certs via **DNS-01**
-(free Cloudflare zone) so no inbound port 80 is required. `staging.<domain>` and `<domain>`
-point at the two node IPs.
+A registered domain is the only truly unavoidable cost besides AWS. EKS load balancers hand out **DNS
+names, not static IPs**, so hosts are **CNAMEs to an NLB hostname** (Cloudflare zone, managed outside
+this repo). Because the gate (raw TCP) and web (HTTP) sit behind **two separate NLBs**, they use two
+hostnames and two cert-issuance methods:
+
+- **Web / grafana** (`telos.double-nibble.com`, `grafana.staging.telos.…`) → CNAME the **ingress-nginx
+  NLB**; cert via **HTTP-01** through ingress-nginx.
+- **Telnet gate** (prod, `gate.telos.double-nibble.com`) → CNAME the **gate NLB**; cert via **DNS-01**
+  (Cloudflare). HTTP-01 can't validate a name that resolves to the gate NLB (no HTTP listener there),
+  so the gate cert must use DNS-01 (`k8s/addons/letsencrypt-dns01.yaml`). Staging's gate is plaintext,
+  so it needs no cert.
 
 ## Known gotchas (see RUNBOOK for mitigations)
 
-1. **A1 free capacity is scarce** — "out of host capacity" is common in busy regions; pick a
-   quiet region/AD and let Terraform retry.
-2. **Host firewall** — Oracle instances block all but SSH at the instance level *and* the VCN
-   security list. cloud-init opens the telnet/web ports in `iptables`; the network module opens
-   the security list. Ubuntu images avoid the `firewalld` variant.
-3. **arm64 images** — the app CI must publish arm64 or the pods won't schedule on A1.
-4. **Single-node handoff guard** — confirm whether a single-shard world still trips the keyless
-   handoff boot guard; if so, provide `TELOS_HANDOFF_SIGNING_KEY/VERIFY_KEY` rather than leaving
-   `TELOS_ALLOW_INSECURE` on in production.
-
-## Open items before first apply
-
-- [ ] OCI tenancy/compartment OCIDs, region, and an uploaded SSH public key (`*.tfvars`).
-- [ ] Register a domain; create two GitHub OAuth apps (staging + prod callback URLs).
-- [ ] Add `linux/arm64` to the `gomud` image build workflow.
-- [ ] Generate the age key; add it to both repos' Actions secrets.
-- [ ] Verify the gate's TLS cert env wiring and the single-node handoff-guard question above.
+1. **Single-AZ EBS pinning** — EBS volumes are AZ-locked; the node group is pinned to one AZ so a
+   single-replica pod and its volume never end up in different AZs. Durability ceiling: an AZ outage
+   or a lost EBS volume is a total outage recoverable only from the nightly S3 backup (RPO up to ~24h).
+   A single instance type in one AZ also has no capacity fallback — an Insufficient-Capacity event on a
+   node replace can't self-heal; widen `instance_types` if that matters.
+2. **NetworkPolicy is opt-in on EKS** — the VPC CNI does NOT enforce NetworkPolicy unless
+   `enableNetworkPolicy=true` is set on the addon (the eks module sets it). Without it the default-deny
+   posture in `networkpolicy.yaml` silently fails open. Ingress traffic is allowed from the
+   `ingress-nginx` namespace (not `kube-system`, where Traefik used to live).
+3. **DNS is CNAME-to-NLB-hostname**, not A-record-to-IP. Web/grafana CNAME the ingress NLB (HTTP-01
+   cert); the prod telnet gate CNAMEs its own NLB and needs a **DNS-01** cert (HTTP-01 can't reach it).
+4. **Teardown ordering** — delete the LoadBalancer Services (their NLBs) and empty the versioned S3
+   backup bucket before `terraform destroy`, or the VPC / bucket deletion is blocked.
+5. **Node memory** — `t4g.large` (8 GB) may be tight with the full LGTM stack; bump to `t4g.xlarge`.

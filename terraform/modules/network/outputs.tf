@@ -1,9 +1,14 @@
-output "subnet_id" {
-  value       = oci_core_subnet.public.id
-  description = "OCID of the public subnet the VM attaches to."
+output "vpc_id" {
+  value       = module.vpc.vpc_id
+  description = "ID of the VPC."
 }
 
-output "vcn_id" {
-  value       = oci_core_vcn.this.id
-  description = "OCID of the VCN."
+output "private_subnet_ids" {
+  value       = module.vpc.private_subnets
+  description = "Private subnet IDs (nodes attach here; one is used for the single-AZ node group)."
+}
+
+output "public_subnet_ids" {
+  value       = module.vpc.public_subnets
+  description = "Public subnet IDs (internet-facing NLBs land here)."
 }

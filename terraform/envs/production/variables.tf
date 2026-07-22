@@ -1,46 +1,35 @@
 variable "region" {
   type        = string
-  description = "OCI region, e.g. us-ashburn-1."
+  default     = "us-east-1"
+  description = "AWS region to deploy the cluster into."
 }
 
-variable "tenancy_ocid" {
+variable "cluster_version" {
   type        = string
-  description = "Tenancy OCID."
+  default     = "1.30"
+  description = "EKS Kubernetes control-plane version."
 }
 
-variable "compartment_ocid" {
+variable "vpc_cidr" {
   type        = string
-  description = "Compartment OCID for TelosMUD resources."
+  default     = "10.20.0.0/16"
+  description = "CIDR block for the production VPC (distinct from staging's 10.10/16)."
 }
 
-variable "availability_domain" {
+variable "node_instance_type" {
   type        = string
-  description = "Availability domain, e.g. \"Uocm:US-ASHBURN-AD-1\"."
+  default     = "t4g.large"
+  description = "Node group EC2 instance type (Graviton/arm64 default). Bump to t4g.xlarge (16 GB) if the LGTM stack is memory-tight."
 }
 
-variable "image_ocid" {
+variable "node_ami_type" {
   type        = string
-  description = "OCID of the Ubuntu 22.04 aarch64 image in this region."
+  default     = "AL2023_ARM_64_STANDARD"
+  description = "EKS node AMI type. Must match node_instance_type arch."
 }
 
-variable "ssh_public_key_path" {
-  type        = string
-  description = "Path to the SSH public key to inject into the VM."
-}
-
-variable "ssh_private_key_path" {
-  type        = string
-  description = "Path to the matching SSH private key (used to fetch the kubeconfig)."
-}
-
-variable "ocpus" {
-  type        = number
-  default     = 2
-  description = "A1.Flex OCPUs. Lower (e.g. 1) to improve odds against 'Out of host capacity'."
-}
-
-variable "memory_gbs" {
-  type        = number
-  default     = 12
-  description = "A1.Flex memory in GB (Always-Free pool total is 24 across all VMs)."
+variable "admin_principal_arns" {
+  type        = list(string)
+  default     = []
+  description = "Extra IAM principal ARNs granted cluster-admin (e.g. the CI OIDC role ARN)."
 }

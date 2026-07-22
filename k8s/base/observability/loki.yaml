@@ -1,9 +1,9 @@
-# Loki (#8) — single-binary (-target=all), filesystem storage, on a single-node k3s cluster.
+# Loki (#8) — single-binary (-target=all), filesystem storage, on a single-node EKS cluster.
 #
 # RETENTION IS THE LOAD-BEARING PART (#8/#11). Loki deletes NOTHING by default: without
-# compactor.retention_enabled logs live forever, and on this cluster local-path PVCs are just
-# directories on the 50 GB node root FS with NO size enforcement — an unbounded Loki fills / and takes
-# postgres/nats/world/gate/account down with it. So retention is configured HERE, before first ingest.
+# compactor.retention_enabled logs live forever. The gp3 PVC IS size-bounded (unlike the old k3s
+# local-path), so an unbounded Loki fills its OWN volume and goes ReadOnly rather than taking the node
+# down — but that still loses observability, so retention is configured HERE, before first ingest.
 apiVersion: v1
 kind: ConfigMap
 metadata:

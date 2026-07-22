@@ -4,7 +4,9 @@ name: deploy
 # secret first. Runs on manual dispatch and on pushes to main that touch k8s/.
 #
 # REQUIRED repo secrets for this to actually reach a cluster:
-#   - KUBECONFIG_STAGING (and KUBECONFIG_PRODUCTION) — base64 of the cluster kubeconfig.
+#   - AWS_ROLE_ARN — the IAM role this workflow assumes via GitHub OIDC. It must be granted an EKS
+#     access entry with cluster-admin (terraform passes it via admin_principal_arns). kubeconfig is
+#     fetched at runtime with `aws eks update-kubeconfig` — no base64 kubeconfig secret needed.
 # OPTIONAL (only if you keep cluster Secrets under SOPS in this repo):
 #   - SOPS_AGE_KEY + a committed k8s/overlays/<env>/secrets.enc.yaml. When either is absent the secrets
 #     step is SKIPPED with a note — the cluster's already-applied `telos-secrets` is used as-is. (Staging
@@ -23,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # GitHub OIDC -> AWS role assumption
 
 jobs:
   deploy:
@@ -36,6 +39,8 @@ jobs:
       matrix:
         # On push, deploy staging only; production is manual (workflow_dispatch) for safety.
         env: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.env)) || fromJSON('["staging"]') }}
+    env:
+      AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v4
 
@@ -56,19 +61,18 @@ jobs:
           curl -fsSLo sops https://github.com/getsops/sops/releases/download/v3.9.0/sops-v3.9.0.linux.amd64
           sudo install sops /usr/local/bin/sops
 
-      - name: Configure kubeconfig
-        env:
-          KUBECONFIG_B64: ${{ secrets[format('KUBECONFIG_{0}', matrix.env)] }}
+      # Keyless AWS auth via GitHub OIDC, then fetch the kubeconfig from EKS. The assumed role must
+      # have an EKS access entry with cluster-admin (terraform admin_principal_arns) or apply is denied.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig (aws eks update-kubeconfig)
         run: |
           set -euo pipefail
-          if [ -z "${KUBECONFIG_B64}" ]; then
-            echo "::error::Missing repo secret KUBECONFIG_${{ matrix.env }} (base64 of the cluster kubeconfig)."
-            echo "::error::Add it in the repo settings, or deploy locally per RUNBOOK.md §4."
-            exit 1
-          fi
-          mkdir -p ~/.kube
-          echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
+          aws eks update-kubeconfig --name "telos-${{ matrix.env }}" --region "${AWS_REGION}"
           kubectl version --client >/dev/null
 
       - name: Apply cluster Secrets (SOPS — optional)
