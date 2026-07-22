@@ -65,7 +65,7 @@ spec:
                   key: TELOS_ACCOUNT_VERIFY_KEY
             # Prod uses a real handoff keypair instead of TELOS_ALLOW_INSECURE. NOTE: a single
             # shard never hands off — verify whether the boot guard still requires these
-            # (PLAN.md open item). If it does not, they are harmless; if the guard rejects a
+            # (open item). If it does not, they are harmless; if the guard rejects a
             # keyless single node, this satisfies it without opening insecure mode.
             - name: TELOS_HANDOFF_SIGNING_KEY
               valueFrom:
