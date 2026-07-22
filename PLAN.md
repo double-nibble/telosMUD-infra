@@ -111,19 +111,23 @@ An **S3 bucket** (`telosmud-tfstate`, one key per env) with **native S3 state lo
 (`use_lockfile`, Terraform ≥1.11 — no DynamoDB table). Created once, out of band, before the first
 `terraform init` (RUNBOOK §0).
 
-## Domain & TLS
+## Domain & TLS (fully automated, per-env isolated)
 
-A registered domain is the only truly unavoidable cost besides AWS. EKS load balancers hand out **DNS
-names, not static IPs**, so hosts are **CNAMEs to an NLB hostname** (Cloudflare zone, managed outside
-this repo). Because the gate (raw TCP) and web (HTTP) sit behind **two separate NLBs**, they use two
-hostnames and two cert-issuance methods:
+A registered domain is the only unavoidable cost besides AWS, and it's the only DNS thing you set up:
+a **root Route53 zone** (`double-nibble.com`). Everything else is automatic and **isolated per env** —
+each env's `up` creates its **own subzone** (`staging.telos.…` / `telos.…`), delegates it from the root
+(NS record), and scopes that env's external-dns + cert-manager **IRSA to only its own subzone**. So a
+compromised staging DNS/cert pod cannot touch production names (Route53 IAM can't scope below a zone,
+hence separate zones). `down` deletes the subzone + delegation.
 
-- **Web / grafana** (`telos.double-nibble.com`, `grafana.staging.telos.…`) → CNAME the **ingress-nginx
-  NLB**; cert via **HTTP-01** through ingress-nginx.
-- **Telnet gate** (prod, `gate.telos.double-nibble.com`) → CNAME the **gate NLB**; cert via **DNS-01**
-  (Cloudflare). HTTP-01 can't validate a name that resolves to the gate NLB (no HTTP listener there),
-  so the gate cert must use DNS-01 (`k8s/addons/letsencrypt-dns01.yaml`). Staging's gate is plaintext,
-  so it needs no cert.
+EKS LBs hand out **DNS names, not IPs**, and the gate (raw TCP) and web (HTTP) sit behind **two separate
+NLBs**, so within a subzone external-dns writes:
+
+- **Web / grafana** → **ALIAS A** to the **ingress-nginx NLB** (from the Ingress host); cert via
+  **HTTP-01** through ingress-nginx.
+- **Telnet gate** (prod, `gate.telos.…`) → ALIAS A to the **gate NLB** (from the Service annotation);
+  cert via **DNS-01** (Route53 via IRSA). HTTP-01 can't reach the gate NLB (no HTTP listener), so the
+  gate cert uses DNS-01 (`k8s/addons/letsencrypt-dns01.yaml`). Staging's gate is plaintext → no cert.
 
 ## Known gotchas (see RUNBOOK for mitigations)
 

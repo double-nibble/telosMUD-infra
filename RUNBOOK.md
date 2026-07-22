@@ -11,35 +11,88 @@ pipeline. See [PLAN.md](PLAN.md) for the design. The step-by-step sections furth
 - **Bring up:** Actions → **up** → choose env → Run. Or `gh workflow run up.yml -f env=staging`.
   Runs `terraform apply` then the app deploy (secrets + issuers + kustomize + rollout). DNS + TLS
   converge on their own (external-dns writes Route53 from the live NLB hostnames; cert-manager issues
-  the certs).
+  the certs). *Production pauses on its reviewer gate **twice** — once before `terraform apply`, once
+  before the deploy — since both are `environment: production`. Approve both. Staging has no gate.*
 - **Tear down:** Actions → **down** → choose env, type `DESTROY` → Run. Or
   `gh workflow run down.yml -f env=staging -f confirm=DESTROY`. Removes the k8s-created NLBs + EBS
   volumes, waits for them to drain, then `terraform destroy`. The one-time setup below is untouched, so
   a later **up** rebuilds from scratch.
 
-## One-time setup (survives `down`; you do this once)
+## Deploy from scratch (greenfield)
 
-Only four things can't be in the pipeline (each is create-once and persists across `down`/`up`):
+Starting from an empty AWS account + this repo, these are the only manual steps — each is
+**create-once** and survives `down`, so you do them a single time and then live on `up`/`down`. Order:
+A → F. (Assumes `aws` CLI + `gh` CLI authenticated as an account admin, and the `double-nibble.com`
+domain delegated to Route53.)
 
-1. **An AWS identity for CI** — a GitHub-OIDC IAM role (its ARN in the **`AWS_ROLE_ARN`** repo secret),
-   trust policy allowing this repo's OIDC subject, with permissions to manage the stack. It's the
-   Terraform apply principal, so it's cluster-admin automatically (don't also list it in
-   `admin_principal_arns`). *Chicken-and-egg: CI needs an AWS identity to create AWS things.*
-2. **The Terraform state S3 bucket** — records what exists so `down` knows what to remove; it must
-   outlive `terraform destroy`. Globally-unique name; if `telosmud-tfstate` is taken, pick another and
-   update `bucket` in both `terraform/envs/*/backend.tf`:
-   ```sh
-   aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
-   aws s3api put-bucket-versioning --bucket telosmud-tfstate --versioning-configuration Status=Enabled
-   aws s3api put-public-access-block --bucket telosmud-tfstate \
-     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-   ```
-3. **A GitHub OAuth app** (per env) — lives in GitHub; you keep it and pass its id/secret as GH secrets.
-   Callback `https://<web-host>/auth/github/callback`.
-4. **The Route53 hosted zone for your domain** — you own `double-nibble.com`; the pipeline writes the
-   *records* (external-dns + cert-manager via IRSA), but can't own the domain.
+**A. GitHub OIDC provider + CI role** — the AWS identity Actions assume (chicken-and-egg: CI needs an
+AWS identity to create AWS things, so this can't be in the pipeline). One provider per account, one role.
 
-### GitHub Actions secrets to add (once)
+```sh
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+# 1. Trust GitHub's OIDC issuer (thumbprint is a formality — AWS validates via its CA store — but the
+#    flag is required). Skip if the provider already exists.
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+# 2. A role this repo's workflows can assume. AdministratorAccess is pragmatic for a throwaway test
+#    env (it creates VPC/EKS/IAM/Route53/S3); scope it down for anything long-lived (see the note below).
+cat > /tmp/trust.json <<EOF
+{ "Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Principal": { "Federated": "arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com" },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+    "StringLike":   { "token.actions.githubusercontent.com:sub": "repo:double-nibble/telosMUD-infra:*" }
+  } }] }
+EOF
+aws iam create-role --role-name telosmud-ci --assume-role-policy-document file:///tmp/trust.json
+aws iam attach-role-policy --role-name telosmud-ci --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+echo "AWS_ROLE_ARN = arn:aws:iam::${ACCOUNT}:role/telosmud-ci"
+```
+
+The role is the Terraform *apply* principal, so it becomes cluster-admin automatically — do **not** also
+list it in `admin_principal_arns` (a duplicate EKS access entry fails the apply).
+
+> **Least-privilege / hardening (skip for a throwaway test).** The `:*` subject matches every ref and
+> PR, and AdministratorAccess + state-bucket read exposes a lot on one OIDC compromise. For anything
+> long-lived, split into a read-only *plan* role (broad subject) and a *apply* role pinned to
+> `repo:double-nibble/telosMUD-infra:ref:refs/heads/main`, and scope the policy below AdministratorAccess.
+
+**B. Terraform state S3 bucket** — records what exists so `down` knows what to remove; must outlive
+`terraform destroy`. Globally-unique name; if `telosmud-tfstate` is taken, pick another and update
+`bucket` in both `terraform/envs/*/backend.tf`.
+
+```sh
+aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
+aws s3api put-bucket-versioning --bucket telosmud-tfstate --versioning-configuration Status=Enabled
+aws s3api put-public-access-block --bucket telosmud-tfstate \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+```
+
+**C. Route53 root zone** — you own the domain; that's all you provide. The **root** hosted zone
+(`root_dns_zone_name`, default `double-nibble.com`) must exist and be delegated at your registrar. From
+there the pipeline is automatic: each env's `up` **creates its own subzone** (`staging.telos.…` /
+`telos.…`) and writes the NS delegation into the root zone, and `down` removes them. Per-env subzones
+mean each env's DNS/cert IAM (IRSA) is scoped to *only its own* zone — a compromised staging pod can't
+touch production names. (If the root zone doesn't exist: `aws route53 create-hosted-zone` and point your
+registrar's nameservers at its four Route53 NS values.)
+
+**D. GitHub OAuth app** (one per env) — lives in GitHub. Register at
+`https://github.com/settings/developers` → New OAuth App, callback
+`https://staging.telos.double-nibble.com/auth/github/callback` (prod: `https://telos.double-nibble.com/...`).
+Keep the client id/secret for step E.
+
+**E. GitHub Actions secrets** (below).
+
+**F. Run it:** Actions → **up** → `staging` → Run (or `gh workflow run up.yml -f env=staging`). ~20 min
+later staging is live, DNS + certs and all. Tear down with **down**.
+
+### E. GitHub Actions secrets to add (once)
 
 | Secret | Needed for |
 |---|---|
@@ -48,8 +101,21 @@ Only four things can't be in the pipeline (each is create-once and persists acro
 | `TELOS_WEB_SESSION_KEY` | web session signing |
 | `TELOS_GITHUB_CLIENT_ID` / `TELOS_GITHUB_CLIENT_SECRET` | OAuth login (empty → pods start, no login) |
 | `GRAFANA_ADMIN_PASSWORD` | Grafana (optional; unset → Grafana pod doesn't start) |
+| `BACKUP_AWS_ACCESS_KEY_ID` / `BACKUP_AWS_SECRET_ACCESS_KEY` | nightly pg-backup to S3 (optional; unset → backups don't run) |
 | **production only:** `TELOS_ACCOUNT_CALLER_TOKEN`, `TELOS_ACCOUNT_SIGNING_KEY`, `TELOS_ACCOUNT_VERIFY_KEY`, `TELOS_HANDOFF_SIGNING_KEY`, `TELOS_HANDOFF_VERIFY_KEY` | the hardened overlay |
 
+Set them with the `gh` CLI (values stay out of the terminal — `gh` prompts, or pipe them in):
+
+```sh
+gh secret set AWS_ROLE_ARN --body "arn:aws:iam::<ACCOUNT>:role/telosmud-ci"
+gh secret set POSTGRES_PASSWORD --body "$(openssl rand -hex 24)"      # URL-safe; stable
+gh secret set TELOS_WEB_SESSION_KEY --body "$(openssl rand -base64 32)"
+gh secret set TELOS_GITHUB_CLIENT_ID       # prompts for the value (from step D)
+gh secret set TELOS_GITHUB_CLIENT_SECRET
+gh secret set GRAFANA_ADMIN_PASSWORD --body "$(openssl rand -base64 24)"
+```
+
+Repo secrets are visible to both the `staging` and `production` Environments, so one set covers both.
 That's the whole manual surface. **You never run `kubectl` or `aws` by hand** — `up`/`down` do it all.
 
 ---
@@ -155,7 +221,8 @@ group is single-AZ.
 
 **You don't create DNS records.** `external-dns` (installed by cluster-bootstrap, Route53 via IRSA)
 watches the web Ingress hosts and the gate Service's `external-dns.alpha.kubernetes.io/hostname`
-annotation and writes the CNAMEs into Route53, pointed at whatever NLB hostnames AWS assigned:
+annotation and writes the records into the env subzone — **ALIAS A** records for the NLB targets (not
+CNAMEs; external-dns uses ALIAS for AWS ELB/NLB), pointed at whatever NLB hostnames AWS assigned:
 
 ```
 staging.telos.double-nibble.com          -> ingress-nginx NLB   # web / OAuth  (from the Ingress host)

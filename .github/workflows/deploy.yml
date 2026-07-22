@@ -83,16 +83,22 @@ jobs:
           TELOS_HANDOFF_SIGNING_KEY: ${{ secrets.TELOS_HANDOFF_SIGNING_KEY }}
           TELOS_HANDOFF_VERIFY_KEY: ${{ secrets.TELOS_HANDOFF_VERIFY_KEY }}
         run: |
+          # NOTE: never add `set -x` to this step — `create secret --dry-run -o yaml` materializes the
+          # values base64-encoded, which GitHub's log masking does NOT redact. Keep values off the log.
           set -euo pipefail
           if [ -z "${POSTGRES_PASSWORD}" ] || [ -z "${TELOS_WEB_SESSION_KEY}" ]; then
             echo "::error::Missing required secrets POSTGRES_PASSWORD and/or TELOS_WEB_SESSION_KEY."
             echo "::error::Add them in repo Settings -> Secrets and variables -> Actions."
             exit 1
           fi
+          # URL-encode the password for the DSN: postgres takes POSTGRES_PASSWORD raw, but the DSN is a
+          # URL, so a literal @ : / ? # % in the password would mis-parse the connection string and break
+          # world/account/db-init (a silent first-run failure). Postgres still gets the raw value below.
+          DSN_PW="$(jq -rn --arg p "${POSTGRES_PASSWORD}" '$p|@uri')"
           # Base keys every env needs. The DSN embeds the same password postgres initializes with.
           args=(
             --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
-            --from-literal=TELOS_POSTGRES_DSN="postgres://telos:${POSTGRES_PASSWORD}@postgres:5432/telosmud?sslmode=disable"
+            --from-literal=TELOS_POSTGRES_DSN="postgres://telos:${DSN_PW}@postgres:5432/telosmud?sslmode=disable"
             --from-literal=TELOS_WEB_SESSION_KEY="${TELOS_WEB_SESSION_KEY}"
             --from-literal=TELOS_GITHUB_CLIENT_ID="${TELOS_GITHUB_CLIENT_ID}"
             --from-literal=TELOS_GITHUB_CLIENT_SECRET="${TELOS_GITHUB_CLIENT_SECRET}"
@@ -121,6 +127,25 @@ jobs:
           fi
           kubectl -n telosmud create secret generic grafana-admin \
             --from-literal=admin-password="${GRAFANA_ADMIN_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create backup-s3 (optional — enables the nightly pg-backup CronJob)
+        env:
+          BACKUP_AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_AWS_ACCESS_KEY_ID }}
+          BACKUP_AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_AWS_ACCESS_KEY_ID}" ] || [ -z "${BACKUP_AWS_SECRET_ACCESS_KEY}" ]; then
+            echo "::notice::BACKUP_AWS_* unset — skipping. The nightly pg-backup CronJob won't run (fine for a throwaway env). FOLLOW-UP: move pg-backup to IRSA to drop these keys."
+            exit 0
+          fi
+          BUCKET="telos-${ENVIRONMENT}-backups-$(aws sts get-caller-identity --query Account --output text)"
+          kubectl -n telosmud create secret generic backup-s3 \
+            --from-literal=AWS_ACCESS_KEY_ID="${BACKUP_AWS_ACCESS_KEY_ID}" \
+            --from-literal=AWS_SECRET_ACCESS_KEY="${BACKUP_AWS_SECRET_ACCESS_KEY}" \
+            --from-literal=AWS_DEFAULT_REGION="${AWS_REGION}" \
+            --from-literal=BACKUP_BUCKET="${BUCKET}" \
+            --from-literal=BACKUP_PREFIX="${ENVIRONMENT}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply cert-manager ClusterIssuers

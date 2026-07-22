@@ -16,20 +16,42 @@
 # time before the CRD exists (a first-apply chicken-and-egg). They are applied by the deploy workflow
 # after cert-manager is up — see k8s/addons/*.yaml.
 
-data "aws_route53_zone" "this" {
-  name         = var.dns_zone_name
+# Per-env DNS isolation. Each env gets its OWN Route53 hosted zone (staging.telos.double-nibble.com /
+# telos.double-nibble.com), delegated from the root zone with an NS record. The controllers' IRSA is
+# scoped to THIS zone only, so a compromised staging DNS/cert pod cannot touch production names (Route53
+# IAM can't scope finer than a whole zone, hence the separate zones). Terraform owns the subzone + the
+# delegation, so `up` creates them and `down` removes them — no manual zone/NS setup.
+data "aws_route53_zone" "root" {
+  name         = var.root_dns_zone_name # the domain you own, e.g. double-nibble.com
   private_zone = false
 }
 
-# IRSA roles for the Route53-writing controllers, scoped to just this one hosted zone. The upstream
-# module wires the OIDC trust + the AWS-recommended policies (no hand-rolled JSON).
+resource "aws_route53_zone" "env" {
+  name = var.dns_zone_name # the env subzone external-dns + cert-manager write into
+  tags = {
+    Project     = "telosmud"
+    Environment = var.name_prefix
+  }
+}
+
+# Delegate the subzone from the root zone (NS record) so it resolves publicly.
+resource "aws_route53_record" "delegation" {
+  zone_id = data.aws_route53_zone.root.zone_id
+  name    = var.dns_zone_name
+  type    = "NS"
+  ttl     = 300
+  records = aws_route53_zone.env.name_servers
+}
+
+# IRSA roles for the Route53-writing controllers, scoped to the ENV subzone only. The upstream module
+# wires the OIDC trust (sub + aud conditions) + the AWS-recommended policies (no hand-rolled JSON).
 module "external_dns_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.44"
 
   role_name                     = "${var.name_prefix}-external-dns"
   attach_external_dns_policy    = true
-  external_dns_hosted_zone_arns = [data.aws_route53_zone.this.arn]
+  external_dns_hosted_zone_arns = [aws_route53_zone.env.arn]
 
   oidc_providers = {
     main = {
@@ -45,7 +67,7 @@ module "cert_manager_irsa" {
 
   role_name                     = "${var.name_prefix}-cert-manager"
   attach_cert_manager_policy    = true
-  cert_manager_hosted_zone_arns = [data.aws_route53_zone.this.arn]
+  cert_manager_hosted_zone_arns = [aws_route53_zone.env.arn]
 
   oidc_providers = {
     main = {
@@ -88,6 +110,13 @@ resource "helm_release" "ingress_nginx" {
   set {
     name  = "controller.service.type"
     value = "LoadBalancer"
+  }
+  # Publish the controller's LB hostname onto every Ingress's status. LOAD-BEARING: external-dns reads
+  # the Ingress status to create the web DNS record, and cert-manager HTTP-01 needs the host resolving.
+  # The chart defaults this to true, but pin it so a chart bump can't silently kill web DNS + certs.
+  set {
+    name  = "controller.publishService.enabled"
+    value = "true"
   }
   set {
     name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"

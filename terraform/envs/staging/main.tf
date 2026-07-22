@@ -31,11 +31,12 @@ module "eks" {
 }
 
 module "cluster_bootstrap" {
-  source            = "../../modules/cluster-bootstrap"
-  name_prefix       = local.name_prefix
-  region            = var.region
-  oidc_provider_arn = module.eks.oidc_provider_arn
-  dns_zone_name     = var.dns_zone_name
+  source             = "../../modules/cluster-bootstrap"
+  name_prefix        = local.name_prefix
+  region             = var.region
+  oidc_provider_arn  = module.eks.oidc_provider_arn
+  dns_zone_name      = var.dns_zone_name
+  root_dns_zone_name = var.root_dns_zone_name
   # Globally-unique, no user input: account-scoped bucket name.
   backup_bucket_name = "telos-staging-backups-${data.aws_caller_identity.current.account_id}"
 }

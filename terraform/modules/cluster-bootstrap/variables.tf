@@ -15,7 +15,12 @@ variable "oidc_provider_arn" {
 
 variable "dns_zone_name" {
   type        = string
-  description = "Route53 hosted-zone name external-dns + cert-manager manage records in, e.g. \"double-nibble.com\"."
+  description = "The ENV subzone external-dns + cert-manager manage (created here), e.g. \"staging.telos.double-nibble.com\"."
+}
+
+variable "root_dns_zone_name" {
+  type        = string
+  description = "The pre-existing root hosted zone you own (e.g. \"double-nibble.com\"), where the env subzone's NS delegation is written."
 }
 
 variable "backup_bucket_name" {
