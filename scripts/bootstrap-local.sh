@@ -57,7 +57,7 @@ write_tfvars production
 
 cat <<EOF
 
-Done. Next (see RUNBOOK.md for the full path):
+Done. This is the LOCAL-apply escape hatch; the normal path is the 'up' GitHub Action (see README.md).
   0. (once) create the S3 state bucket named in backend.tf (native S3 locking; no DynamoDB table)
   1. cd terraform/envs/staging && terraform init && terraform apply
   2. aws eks update-kubeconfig --name telos-staging --region $REGION
