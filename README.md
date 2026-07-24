@@ -1,8 +1,10 @@
 # telosMUD-infra
 
-A one-click **demo** deployment of [TelosMUD](../gomud) to **AWS EKS**. This is not a production
-application manager — it's a reference for standing the whole stack up on real infrastructure,
-exercising it, and tearing it down to stop paying. Deliberately single-node, single-AZ, throwaway.
+A one-click **demo** deployment of 
+[TelosMUD](https://github.com/double-nibble/telosMUD) to **AWS EKS**. This is
+not a production application manager — it's a reference for standing the whole
+stack up on real infrastructure, exercising it, and tearing it down to stop
+paying. Deliberately single-node, single-AZ, throwaway.
 
 **Lifecycle is two GitHub Actions:** **`up`** builds an entire environment; **`down`** destroys it.
 Everything in between (secrets, DNS, TLS, the app) is automatic — no manual `kubectl`/`aws`.
@@ -38,9 +40,6 @@ aws iam attach-role-policy --role-name telosmud-ci --policy-arn arn:aws:iam::aws
 
 ```sh
 aws s3api create-bucket --bucket telosmud-tfstate --region us-east-1
-aws s3api put-bucket-versioning --bucket telosmud-tfstate --versioning-configuration Status=Enabled
-aws s3api put-public-access-block --bucket telosmud-tfstate \
-  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
 ### 3. Root Route53 zone
